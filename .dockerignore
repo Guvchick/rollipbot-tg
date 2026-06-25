@@ -1,0 +1,17 @@
+# keep the build context small and secrets/state out of the image
+.git
+.gitignore
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+cookies*.json
+graphify-out/
+dist/
+/bot
+/ip-roller-bot
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml

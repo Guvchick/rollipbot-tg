@@ -1,0 +1,118 @@
+# IP-Roller Bot — конфигурация.
+# Секреты подставляются из переменных окружения через ${VAR} (см. .env.example).
+# Включай провайдера только когда задал его токен/креды: enabled: true.
+
+telegram:
+  token: ${TELEGRAM_TOKEN}
+  admin_user_ids: []            # напр. [123456789] — кто управляет аккаунтами и whitelist'ом
+  allowed_user_ids: []          # статически разрешённые; пустые admin+allowed+whitelist = доступ всем
+
+storage:
+  driver: sqlite                # реализован только sqlite
+  dsn: ./ip-roller.db
+
+# ВНИМАНИЕ: креды провайдеров теперь хранятся в SQL-таблице accounts (можно
+# несколько аккаунтов на каждый тип). Блоки providers ниже — это (1) дефолты по
+# типу (caps, маски, strategy, region/zone/auth_url) и (2) ОДНОРАЗОВЫЙ сид: при
+# первом старте, если таблица accounts пуста, включённые блоки с заданными
+# кредами (${...} из env) заводятся как аккаунт label="default". Дальше управляй
+# аккаунтами через бота: /accounts, /addaccount, /delaccount, /enableaccount.
+# env нужен только для первичного сида — после него можно убрать токены из env.
+providers:
+  # --- floating/reserved IP через API (лучший случай для роллинга) ---
+
+  timeweb:
+    enabled: true               # самый чистый REST — включён по умолчанию
+    token: ${TIMEWEB_TOKEN}
+    availability_zone: spb-1
+    strategy: floating
+    max_rolls_per_run: 10
+    daily_cap: 10               # Timeweb: ≤10 новых IPv4/сутки на сервер
+    rate_limit_rps: 15          # держим ниже 20/s
+    cost_per_roll: "~150₽/мес пока IP не удалён"
+    masks: ["185.12.0.0/16", "95.142.*.*"]
+
+  vkcloud:
+    enabled: false
+    auth_url: https://infra.mail.ru:35357/v3/
+    region: RegionOne
+    app_credential_id: ${VK_APP_CRED_ID}
+    app_credential_secret: ${VK_APP_CRED_SECRET}
+    floating_network_id: ${VK_EXT_NET_ID}
+    strategy: floating
+    max_rolls_per_run: 40
+    daily_cap: 0                # 0 = без дневного лимита, ограничивает квота
+    floating_ip_quota: 50
+    rate_limit_rps: 5
+    masks: ["45.10.0.0/16"]
+
+  selectel:
+    enabled: false
+    auth_url: https://cloud.api.selcloud.ru/identity/v3
+    account_id: ${SEL_ACCOUNT_ID}
+    service_user: ${SEL_SERVICE_USER}
+    service_password: ${SEL_SERVICE_PASSWORD}
+    project_id: ${SEL_PROJECT_ID}
+    region: ru-9
+    floating_network_id: ${SEL_EXT_NET_ID}
+    strategy: floating
+    max_rolls_per_run: 40
+    daily_cap: 0
+    floating_ip_quota: 50
+    rate_limit_rps: 5
+    masks: ["188.225.0.0/16", "5.188.*.*"]
+
+  gcore:
+    enabled: false
+    api_url: https://api.gcore.com/cloud
+    api_token: ${GCORE_API_TOKEN}     # заголовок: Authorization: apikey <token>
+    project_id: ${GCORE_PROJECT_ID}
+    region_id: 7
+    strategy: floating
+    max_rolls_per_run: 40
+    daily_cap: 0
+    rate_limit_rps: 5
+    masks: ["92.38.0.0/16"]
+
+  mws:
+    enabled: false
+    token: ${MWS_TOKEN}
+    project_id: ${MWS_PROJECT_ID}
+    network_id: ${MWS_NETWORK_ID}
+    subnetwork_id: ${MWS_SUBNET_ID}
+    strategy: floating
+    max_rolls_per_run: 30
+    daily_cap: 0
+    rate_limit_rps: 5
+    masks: ["89.108.0.0/16"]
+
+  # --- IP привязан к серверу: роллинг пересозданием / заказом доп. IP ---
+  # Allocate выдаёт явную ошибку, пока не задан server_id и платный сценарий
+  # (эти операции мутируют/пересоздают реальные платные серверы).
+
+  ruvds:
+    enabled: false
+    token: ${RUVDS_TOKEN}
+    strategy: recreate          # recreate | additional_ip
+    server_id: ${RUVDS_SERVER_ID}
+    max_rolls_per_run: 3
+    daily_cap: 5
+    rate_limit_rps: 2
+    cost_per_roll: "пересоздание сервера"
+    masks: ["31.130.0.0/16"]
+
+  beget:
+    enabled: false
+    api_url: https://api.beget.com
+    token: ${BEGET_TOKEN}
+    strategy: additional_ip     # additional_ip | recreate
+    server_id: ${BEGET_SERVER_ID}
+    max_rolls_per_run: 5
+    daily_cap: 10
+    rate_limit_rps: 2
+    cost_per_roll: "поштучная оплата IP"
+    masks: ["5.101.0.0/16"]
+
+  # IHC / Contell / UFO.Hosting / Vinton — публичного API нет, роллинг только
+  # через cookie-фолбэк (internal/provider/cookie). Нативного адаптера нет,
+  # поэтому здесь они не настраиваются.

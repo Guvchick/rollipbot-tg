@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    image: ip-roller-bot:latest
+    container_name: ip-roller-bot
+    restart: unless-stopped
+    # Tokens (TELEGRAM_TOKEN, *_TOKEN, ...) приходят из .env и подставляются
+    # в config.yaml через ${...} уже внутри приложения.
+    env_file:
+      - .env
+    environment:
+      # БД на персистентном томе; перекрывает dsn из config.yaml.
+      STORAGE_DSN: /data/ip-roller.db
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - botdata:/data
+    # бот — long-poll клиент, входящие порты не нужны
+    stop_grace_period: 15s
+
+volumes:
+  botdata:

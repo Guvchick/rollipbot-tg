@@ -1,0 +1,90 @@
+package bot
+
+import (
+	"fmt"
+
+	"github.com/go-telegram/bot/models"
+
+	"ip-roller-bot/internal/provider"
+)
+
+// typeNames maps provider type to a pretty label.
+var typeNames = map[string]string{
+	"timeweb":  "Timeweb",
+	"vkcloud":  "VK Cloud",
+	"selectel": "Selectel",
+	"gcore":    "Gcore",
+	"mws":      "MWS",
+	"ruvds":    "RuVDS",
+	"beget":    "Beget",
+}
+
+func typeName(t string) string {
+	if d, ok := typeNames[t]; ok {
+		return d
+	}
+	return t
+}
+
+// accountDisplay renders an account as "Type · label".
+func accountDisplay(a *provider.Account) string {
+	return typeName(a.Type()) + " · " + a.Label()
+}
+
+func cancelRow() []models.InlineKeyboardButton {
+	return []models.InlineKeyboardButton{{Text: "✖️ Отмена", CallbackData: "cancel"}}
+}
+
+// providerKeyboard lists enabled accounts, one per row (labels can be long).
+func providerKeyboard(accs []*provider.Account) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	for _, a := range accs {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: accountDisplay(a), CallbackData: "prov:" + a.Key()},
+		})
+	}
+	rows = append(rows, cancelRow())
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// maskKeyboard offers preset masks from config plus a cancel button.
+func maskKeyboard(masks []string) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	for _, m := range masks {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: m, CallbackData: "mask:" + m},
+		})
+	}
+	rows = append(rows, cancelRow())
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func budgetKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{
+			{Text: "5", CallbackData: "budget:5"},
+			{Text: "10", CallbackData: "budget:10"},
+			{Text: "25", CallbackData: "budget:25"},
+			{Text: "макс", CallbackData: "budget:max"},
+		},
+		cancelRow(),
+	}}
+}
+
+func confirmKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{
+			{Text: "▶️ Запустить", CallbackData: "run"},
+			{Text: "✖️ Отмена", CallbackData: "cancel"},
+		},
+	}}
+}
+
+func resultKeyboard(poolID int64) *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{
+			{Text: "🔗 Привязать к ВМ", CallbackData: fmt.Sprintf("attach:%d", poolID)},
+			{Text: "✅ Оставить в пуле", CallbackData: "pool"},
+		},
+	}}
+}

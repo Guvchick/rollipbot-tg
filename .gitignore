@@ -1,0 +1,18 @@
+# secrets & local state
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+cookies*.json
+
+# build
+/bot
+/ip-roller-bot
+dist/
+
+# graphify output
+graphify-out/
+
+# OS / editor
+.DS_Store
