@@ -5,6 +5,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -14,7 +16,15 @@ import (
 type Config struct {
 	Telegram  TelegramConfig  `yaml:"telegram"`
 	Storage   StorageConfig   `yaml:"storage"`
+	Notify    NotifyConfig    `yaml:"notify"`
 	Providers ProvidersConfig `yaml:"providers"`
+}
+
+// NotifyConfig configures pushing roll/catch logs to a separate Telegram forum
+// supergroup, sorted into per-account topics.
+type NotifyConfig struct {
+	Enabled bool  `yaml:"enabled"`
+	ChatID  int64 `yaml:"chat_id"` // id форум-супергруппы (-100...); env: NOTIFY_CHAT_ID
 }
 
 type TelegramConfig struct {
@@ -154,5 +164,34 @@ func Load(path string) (*Config, error) {
 	if dsn := os.Getenv("STORAGE_DSN"); dsn != "" {
 		cfg.Storage.DSN = dsn
 	}
+	// Admins / allowed users can also come from env (handy for .env / Docker).
+	// Lists are comma/space separated, e.g. TELEGRAM_ADMIN_IDS=123,456
+	cfg.Telegram.AdminUserIDs = append(cfg.Telegram.AdminUserIDs, parseIDList(os.Getenv("TELEGRAM_ADMIN_IDS"))...)
+	cfg.Telegram.AllowedUserIDs = append(cfg.Telegram.AllowedUserIDs, parseIDList(os.Getenv("TELEGRAM_ALLOWED_IDS"))...)
+
+	// Notify chat id can come from env; if a chat is set, notifications are on.
+	if v := os.Getenv("NOTIFY_CHAT_ID"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.Notify.ChatID = n
+		}
+	}
+	if cfg.Notify.ChatID != 0 {
+		cfg.Notify.Enabled = true
+	}
+
 	return &cfg, nil
+}
+
+// parseIDList parses a comma/space/semicolon separated list of int64 ids,
+// silently skipping non-numeric tokens.
+func parseIDList(s string) []int64 {
+	var out []int64
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';' || r == '\t' || r == '\n'
+	}) {
+		if n, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }

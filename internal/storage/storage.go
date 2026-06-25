@@ -71,5 +71,9 @@ type Storage interface {
 	AddAllowedUser(ctx context.Context, u AllowedUser) error
 	RemoveAllowedUser(ctx context.Context, userID int64) error
 
+	// Forum topic id cache (name → message_thread_id) for notifications
+	GetForumTopic(ctx context.Context, name string) (threadID int, ok bool, err error)
+	SetForumTopic(ctx context.Context, name string, threadID int) error
+
 	Close() error
 }

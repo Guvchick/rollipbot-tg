@@ -14,6 +14,7 @@ import (
 	"ip-roller-bot/internal/bot"
 	"ip-roller-bot/internal/config"
 	"ip-roller-bot/internal/engine"
+	"ip-roller-bot/internal/notify"
 	"ip-roller-bot/internal/registry"
 	"ip-roller-bot/internal/storage"
 )
@@ -65,5 +66,10 @@ func run(configPath string, log *slog.Logger) error {
 		return err
 	}
 
-	return bot.Run(ctx, cfg, eng, store, reg, acl, log)
+	notifier := notify.New(cfg.Notify.ChatID, cfg.Notify.Enabled, store, log)
+	if notifier.Enabled() {
+		log.Info("уведомления включены", "chat_id", cfg.Notify.ChatID)
+	}
+
+	return bot.Run(ctx, cfg, eng, store, reg, acl, notifier, log)
 }

@@ -21,6 +21,7 @@ import (
 
 	"ip-roller-bot/internal/config"
 	"ip-roller-bot/internal/engine"
+	"ip-roller-bot/internal/notify"
 	"ip-roller-bot/internal/provider"
 	"ip-roller-bot/internal/registry"
 	"ip-roller-bot/internal/storage"
@@ -29,15 +30,17 @@ import (
 // rollTimeout bounds a single /roll run.
 const rollTimeout = 10 * time.Minute
 
-// Handler wires the bot to the engine, storage, the account registry and ACL.
+// Handler wires the bot to the engine, storage, the account registry, ACL and
+// the forum-group notifier.
 type Handler struct {
-	cfg    *config.Config
-	engine *engine.Engine
-	store  storage.Storage
-	reg    *registry.Registry
-	acl    *ACL
-	fsm    *FSM
-	log    *slog.Logger
+	cfg      *config.Config
+	engine   *engine.Engine
+	store    storage.Storage
+	reg      *registry.Registry
+	acl      *ACL
+	notifier *notify.Notifier
+	fsm      *FSM
+	log      *slog.Logger
 }
 
 // Run builds the bot and blocks until ctx is cancelled.
@@ -48,18 +51,20 @@ func Run(
 	store storage.Storage,
 	reg *registry.Registry,
 	acl *ACL,
+	notifier *notify.Notifier,
 	log *slog.Logger,
 ) error {
 	if !acl.Configured() {
 		log.Warn("доступ не ограничен (нет admin_user_ids/allowed_user_ids/whitelist) — бот ответит любому")
 	}
 
-	h := &Handler{cfg: cfg, engine: eng, store: store, reg: reg, acl: acl, fsm: NewFSM(), log: log}
+	h := &Handler{cfg: cfg, engine: eng, store: store, reg: reg, acl: acl, notifier: notifier, fsm: NewFSM(), log: log}
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(h.onText),
 		bot.WithMiddlewares(h.authMiddleware),
 		bot.WithMessageTextHandler("/start", bot.MatchTypeExact, h.cmdStart),
+		bot.WithMessageTextHandler("/menu", bot.MatchTypeExact, h.cmdMenu),
 		bot.WithMessageTextHandler("/roll", bot.MatchTypeExact, h.cmdRoll),
 		bot.WithMessageTextHandler("/pool", bot.MatchTypeExact, h.cmdPool),
 		bot.WithMessageTextHandler("/limits", bot.MatchTypeExact, h.cmdLimits),
@@ -75,7 +80,10 @@ func Run(
 		bot.WithMessageTextHandler("/users", bot.MatchTypeExact, h.cmdUsers),
 		bot.WithMessageTextHandler("/adduser", bot.MatchTypePrefix, h.cmdAddUser),
 		bot.WithMessageTextHandler("/deluser", bot.MatchTypePrefix, h.cmdDelUser),
-		// callbacks
+		// menu + account management callbacks
+		bot.WithCallbackQueryDataHandler("menu:", bot.MatchTypePrefix, h.cbMenu),
+		bot.WithCallbackQueryDataHandler("acc:", bot.MatchTypePrefix, h.cbAccount),
+		// roll wizard callbacks
 		bot.WithCallbackQueryDataHandler("prov:", bot.MatchTypePrefix, h.cbProvider),
 		bot.WithCallbackQueryDataHandler("mask:", bot.MatchTypePrefix, h.cbMask),
 		bot.WithCallbackQueryDataHandler("budget:", bot.MatchTypePrefix, h.cbBudget),
@@ -121,6 +129,17 @@ func (h *Handler) requireAdmin(ctx context.Context, b *bot.Bot, u *models.Update
 	return false
 }
 
+// requireAdminCB gates a callback on admin rights, answering with an alert.
+func (h *Handler) requireAdminCB(ctx context.Context, b *bot.Bot, q *models.CallbackQuery) bool {
+	if h.acl.IsAdmin(q.From.ID) {
+		return true
+	}
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: q.ID, Text: "⛔ Только для администратора", ShowAlert: true,
+	})
+	return false
+}
+
 func userID(u *models.Update) int64 {
 	if u.Message != nil && u.Message.From != nil {
 		return u.Message.From.ID
@@ -144,6 +163,18 @@ func (h *Handler) send(ctx context.Context, b *bot.Bot, chatID int64, text strin
 		h.log.Warn("send message failed", "err", err)
 	}
 	return m
+}
+
+// sendHTML sends a Telegram HTML-formatted message, falling back to plain text
+// (tags stripped) if Telegram rejects the markup.
+func (h *Handler) sendHTML(ctx context.Context, b *bot.Bot, chatID int64, text string) {
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID, Text: text, ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		h.log.Warn("send html failed, falling back to plain", "err", err)
+		h.send(ctx, b, chatID, stripTags(text))
+	}
 }
 
 func (h *Handler) edit(ctx context.Context, b *bot.Bot, chatID int64, msgID int, text string, kb models.ReplyMarkup) {
@@ -176,27 +207,37 @@ func (h *Handler) displayKey(key string) string {
 // --- commands ---
 
 func (h *Handler) cmdStart(ctx context.Context, b *bot.Bot, u *models.Update) {
-	text := "👋 IP-Roller Bot\n\n" +
-		"Роллю публичные/floating IP у облачных провайдеров до попадания в маску.\n\n" +
-		"Команды:\n" +
-		"/roll — мастер роллинга\n" +
-		"/pool — зарезервированные адреса\n" +
-		"/attach <ip> <vm_id> — привязать адрес к ВМ\n" +
-		"/limits — дневные лимиты по аккаунтам\n" +
-		"/cancel — отменить диалог"
-	if h.acl.IsAdmin(userID(u)) {
-		text += "\n\nАдмин:\n" +
-			"/accounts · /addaccount · /delaccount · /enableaccount · /disableaccount\n" +
-			"/users · /adduser · /deluser"
+	h.sendMenu(ctx, b, u.Message.Chat.ID)
+}
+
+func (h *Handler) cmdMenu(ctx context.Context, b *bot.Bot, u *models.Update) {
+	h.sendMenu(ctx, b, u.Message.Chat.ID)
+}
+
+func (h *Handler) sendMenu(ctx context.Context, b *bot.Bot, chatID int64) {
+	text := "👋 <b>IP-Roller</b> — главное меню\n" +
+		"Роллю публичные/floating IP до попадания в маску.\n\n" +
+		"Всё управление — кнопками ниже. Текстовые команды тоже работают " +
+		"(/roll, /pool, /limits, /attach, /addaccount)."
+	if h.notifier.Enabled() {
+		text += "\n\n🔔 Уведомления о ловле идут в форум-группу (по топикам на аккаунт)."
 	}
-	h.send(ctx, b, u.Message.Chat.ID, text)
+	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID, Text: text, ParseMode: models.ParseModeHTML, ReplyMarkup: mainMenu(),
+	}); err != nil {
+		h.log.Warn("sendMenu failed", "err", err)
+	}
 }
 
 func (h *Handler) cmdRoll(ctx context.Context, b *bot.Bot, u *models.Update) {
-	chatID := u.Message.Chat.ID
+	h.sendRollStart(ctx, b, u.Message.Chat.ID)
+}
+
+// sendRollStart kicks off the /roll wizard (used by command and menu button).
+func (h *Handler) sendRollStart(ctx context.Context, b *bot.Bot, chatID int64) {
 	accs := h.reg.Accounts()
 	if len(accs) == 0 {
-		h.send(ctx, b, chatID, "Нет включённых аккаунтов. Админ может добавить: /addaccount")
+		h.send(ctx, b, chatID, "Нет включённых аккаунтов. Добавь через меню → 🔐 Аккаунты, или /addaccount.")
 		return
 	}
 	m, err := b.SendMessage(ctx, &bot.SendMessageParams{
@@ -205,20 +246,24 @@ func (h *Handler) cmdRoll(ctx context.Context, b *bot.Bot, u *models.Update) {
 		ReplyMarkup: providerKeyboard(accs),
 	})
 	if err != nil {
-		h.log.Warn("cmdRoll send failed", "err", err)
+		h.log.Warn("sendRollStart failed", "err", err)
 		return
 	}
 	h.fsm.Update(chatID, func(s *dialogState) { *s = dialogState{Step: stepProvider, MsgID: m.ID} })
 }
 
 func (h *Handler) cmdPool(ctx context.Context, b *bot.Bot, u *models.Update) {
+	h.showPool(ctx, b, u.Message.Chat.ID)
+}
+
+func (h *Handler) showPool(ctx context.Context, b *bot.Bot, chatID int64) {
 	ips, err := h.store.ListPoolIPs(ctx)
 	if err != nil {
-		h.send(ctx, b, u.Message.Chat.ID, "Ошибка чтения пула: "+err.Error())
+		h.send(ctx, b, chatID, "Ошибка чтения пула: "+err.Error())
 		return
 	}
 	if len(ips) == 0 {
-		h.send(ctx, b, u.Message.Chat.ID, "Пул пуст. Сначала запусти /roll.")
+		h.send(ctx, b, chatID, "Пул пуст. Сначала запусти ролл.")
 		return
 	}
 	var sb strings.Builder
@@ -230,13 +275,17 @@ func (h *Handler) cmdPool(ctx context.Context, b *bot.Bot, u *models.Update) {
 		}
 		fmt.Fprintf(&sb, "• %s — %s [%s] (%s)\n", p.IP, h.displayKey(p.Provider), state, p.MatchedMask)
 	}
-	h.send(ctx, b, u.Message.Chat.ID, sb.String())
+	h.send(ctx, b, chatID, sb.String())
 }
 
 func (h *Handler) cmdLimits(ctx context.Context, b *bot.Bot, u *models.Update) {
+	h.showLimits(ctx, b, u.Message.Chat.ID)
+}
+
+func (h *Handler) showLimits(ctx context.Context, b *bot.Bot, chatID int64) {
 	accs := h.reg.Accounts()
 	if len(accs) == 0 {
-		h.send(ctx, b, u.Message.Chat.ID, "Нет включённых аккаунтов.")
+		h.send(ctx, b, chatID, "Нет включённых аккаунтов.")
 		return
 	}
 	var sb strings.Builder
@@ -249,7 +298,7 @@ func (h *Handler) cmdLimits(ctx context.Context, b *bot.Bot, u *models.Update) {
 		}
 		fmt.Fprintf(&sb, "• %s — %s, rps=%.0f\n", accountDisplay(a), limit, caps.RateLimitRPS)
 	}
-	h.send(ctx, b, u.Message.Chat.ID, sb.String())
+	h.send(ctx, b, chatID, sb.String())
 }
 
 func (h *Handler) cmdCancel(ctx context.Context, b *bot.Bot, u *models.Update) {
@@ -279,26 +328,36 @@ func (h *Handler) cmdAccounts(ctx context.Context, b *bot.Bot, u *models.Update)
 	if !h.requireAdmin(ctx, b, u) {
 		return
 	}
+	text, kb := h.accountsView(ctx)
+	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: u.Message.Chat.ID, Text: text, ReplyMarkup: kb,
+	}); err != nil {
+		h.log.Warn("cmdAccounts send failed", "err", err)
+	}
+}
+
+// accountsView builds the accounts list text + management keyboard.
+func (h *Handler) accountsView(ctx context.Context) (string, *models.InlineKeyboardMarkup) {
 	accs, err := h.store.ListAccounts(ctx)
 	if err != nil {
-		h.send(ctx, b, u.Message.Chat.ID, "Ошибка: "+err.Error())
-		return
+		return "Ошибка: " + err.Error(), accountsMenu(nil)
 	}
 	if len(accs) == 0 {
-		h.send(ctx, b, u.Message.Chat.ID, "Аккаунтов нет. Добавь: /addaccount <тип> <label> <json>\nТипы: "+strings.Join(registry.Types, ", "))
-		return
+		return "🔐 Аккаунтов нет.\nНажми «➕ Добавить» для пошагового гайда, затем пришли /addaccount.", accountsMenu(nil)
 	}
+	rows := make([]accountRow, 0, len(accs))
 	var sb strings.Builder
-	sb.WriteString("🔐 Аккаунты:\n")
+	sb.WriteString("🔐 Аккаунты (левая кнопка — вкл/выкл, 🗑 — удалить):\n")
 	for _, a := range accs {
-		flag := "✅"
+		flag := "✅вкл"
 		if !a.Enabled {
-			flag = "⛔"
+			flag = "⛔выкл"
 		}
-		fmt.Fprintf(&sb, "%s #%d %s · %s — %s\n", flag, a.ID, typeName(a.Provider), a.Label, maskCreds(a.Provider, a.Credentials))
+		disp := typeName(a.Provider) + " · " + a.Label
+		fmt.Fprintf(&sb, "• #%d %s [%s] — %s\n", a.ID, disp, flag, maskCreds(a.Provider, a.Credentials))
+		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled})
 	}
-	sb.WriteString("\nУправление: /enableaccount <id> · /disableaccount <id> · /delaccount <id>")
-	h.send(ctx, b, u.Message.Chat.ID, sb.String())
+	return sb.String(), accountsMenu(rows)
 }
 
 // cmdAddAccount: /addaccount <provider> <label> <json-creds>
@@ -308,23 +367,34 @@ func (h *Handler) cmdAddAccount(ctx context.Context, b *bot.Bot, u *models.Updat
 	}
 	chatID := u.Message.Chat.ID
 	rest := strings.TrimSpace(strings.TrimPrefix(u.Message.Text, "/addaccount"))
-	parts := strings.SplitN(rest, " ", 3)
-	if len(parts) < 3 {
-		h.send(ctx, b, chatID, addAccountHelp())
+
+	// no type → general help (с подсказкой про гайды)
+	if rest == "" {
+		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
 		return
 	}
-	typ, label, raw := parts[0], parts[1], strings.TrimSpace(parts[2])
+	parts := strings.SplitN(rest, " ", 3)
+	typ := parts[0]
 	if !registry.IsType(typ) {
 		h.send(ctx, b, chatID, "Неизвестный тип: "+typ+"\nДоступные: "+strings.Join(registry.Types, ", "))
 		return
 	}
+	// только тип (или тип+label) → показываем пошаговый гайд «где что взять»
+	if len(parts) < 3 {
+		h.sendHTML(ctx, b, chatID, guideHTML(typ))
+		return
+	}
+	label, raw := parts[1], strings.TrimSpace(parts[2])
+
 	var creds map[string]string
 	if err := json.Unmarshal([]byte(raw), &creds); err != nil {
-		h.send(ctx, b, chatID, "Не удалось разобрать JSON кред: "+err.Error()+"\n\n"+addAccountHelp())
+		h.send(ctx, b, chatID, "Не удалось разобрать JSON кред: "+err.Error())
+		h.sendHTML(ctx, b, chatID, guideHTML(typ))
 		return
 	}
 	if err := registry.ValidateCreds(typ, creds); err != nil {
-		h.send(ctx, b, chatID, "Ошибка кред: "+err.Error()+"\n\n"+addAccountHelp())
+		h.send(ctx, b, chatID, "Ошибка кред: "+err.Error())
+		h.sendHTML(ctx, b, chatID, guideHTML(typ))
 		return
 	}
 	id, err := h.store.UpsertAccount(ctx, storage.Account{Provider: typ, Label: label, Enabled: true, Credentials: creds})
@@ -456,6 +526,76 @@ func (h *Handler) cmdDelUser(ctx context.Context, b *bot.Bot, u *models.Update) 
 		return
 	}
 	h.send(ctx, b, chatID, fmt.Sprintf("✅ Пользователь %d удалён из whitelist.", id))
+}
+
+// --- menu + account callbacks ---
+
+func (h *Handler) cbMenu(ctx context.Context, b *bot.Bot, u *models.Update) {
+	q := u.CallbackQuery
+	h.ack(ctx, b, q)
+	chatID, msgID := cbChatMsg(q)
+	switch strings.TrimPrefix(q.Data, "menu:") {
+	case "roll":
+		h.sendRollStart(ctx, b, chatID)
+	case "pool":
+		h.showPool(ctx, b, chatID)
+	case "limits":
+		h.showLimits(ctx, b, chatID)
+	case "accounts":
+		if !h.requireAdminCB(ctx, b, q) {
+			return
+		}
+		h.editAccountsMenu(ctx, b, chatID, msgID)
+	case "back":
+		h.edit(ctx, b, chatID, msgID, "👋 IP-Roller — главное меню", mainMenu())
+	}
+}
+
+func (h *Handler) cbAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
+	q := u.CallbackQuery
+	if !h.requireAdminCB(ctx, b, q) {
+		return
+	}
+	h.ack(ctx, b, q)
+	chatID, msgID := cbChatMsg(q)
+	data := strings.TrimPrefix(q.Data, "acc:")
+
+	switch {
+	case data == "addhelp":
+		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
+		return
+	case strings.HasPrefix(data, "toggle:"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(data, "toggle:"), 10, 64)
+		if err != nil {
+			return
+		}
+		acc, err := h.store.GetAccount(ctx, id)
+		if err != nil {
+			h.edit(ctx, b, chatID, msgID, "Аккаунт не найден.", nil)
+			return
+		}
+		if err := h.store.SetAccountEnabled(ctx, id, !acc.Enabled); err != nil {
+			h.log.Warn("toggle account", "err", err)
+		}
+	case strings.HasPrefix(data, "del:"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(data, "del:"), 10, 64)
+		if err != nil {
+			return
+		}
+		if err := h.store.DeleteAccount(ctx, id); err != nil {
+			h.log.Warn("delete account", "err", err)
+		}
+	}
+	if err := h.reg.Reload(ctx); err != nil {
+		h.log.Warn("reload after account change", "err", err)
+	}
+	h.editAccountsMenu(ctx, b, chatID, msgID)
+}
+
+// editAccountsMenu re-renders the accounts management view in place.
+func (h *Handler) editAccountsMenu(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
+	text, kb := h.accountsView(ctx)
+	h.edit(ctx, b, chatID, msgID, text, kb)
 }
 
 // --- callbacks ---
@@ -668,6 +808,12 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 	if err != nil {
 		h.edit(ctx, b, chatID, msgID, h.rollErrText(display, err), nil)
 		h.fsm.Clear(chatID)
+		// log to the forum group
+		if errors.Is(err, engine.ErrBudgetExhausted) {
+			h.notifier.NoMatch(ctx, b, display, mask, budget)
+		} else {
+			h.notifier.Failed(ctx, b, display, err.Error())
+		}
 		return
 	}
 
@@ -689,6 +835,7 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 	})
 	h.edit(ctx, b, chatID, msgID, fmt.Sprintf("✅ Готово!\nАккаунт: %s\nАдрес: %s\nСовпал за %d попыт.\nID ресурса: %s",
 		display, res.IP.Addr.String(), res.Attempts, res.IP.ID), resultKeyboard(id))
+	h.notifier.Caught(ctx, b, display, res.IP.Addr.String(), mask, res.Attempts)
 }
 
 func (h *Handler) doAttach(ctx context.Context, b *bot.Bot, chatID int64, pool storage.PoolIP, vmID string) {
@@ -712,6 +859,7 @@ func (h *Handler) doAttach(ctx context.Context, b *bot.Bot, chatID int64, pool s
 		}
 	}
 	h.send(ctx, b, chatID, fmt.Sprintf("🔗 %s привязан к %s.", pool.IP, vmID))
+	h.notifier.Attached(ctx, b, h.displayKey(pool.Provider), pool.IP, vmID)
 }
 
 // --- text builders ---
@@ -795,24 +943,4 @@ func maskSecret(s string) string {
 		return "****"
 	}
 	return s[:2] + "***" + s[len(s)-2:]
-}
-
-func addAccountHelp() string {
-	var sb strings.Builder
-	sb.WriteString("Использование: /addaccount <тип> <label> <json>\n")
-	sb.WriteString("Тип повторно с тем же label обновляет аккаунт.\n\nПоля по типам:\n")
-	for _, t := range registry.Types {
-		var fs []string
-		for _, f := range registry.Fields(t) {
-			name := f.Name
-			if f.Required {
-				name = "*" + name
-			}
-			fs = append(fs, name)
-		}
-		fmt.Fprintf(&sb, "• %s: %s\n", t, strings.Join(fs, ", "))
-	}
-	sb.WriteString("\n(* — обязательное; все значения в JSON — строками, region_id тоже: \"7\")\n")
-	sb.WriteString("Пример:\n/addaccount timeweb prod {\"token\":\"xxx\",\"availability_zone\":\"spb-1\"}")
-	return sb.String()
 }

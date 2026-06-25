@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS allowed_users (
     user_id  INTEGER PRIMARY KEY,
     note     TEXT,
     added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS forum_topics (
+    name      TEXT PRIMARY KEY,
+    thread_id INTEGER NOT NULL
 );`
 
 // SQLite is a modernc.org/sqlite-backed Storage.
@@ -292,6 +296,28 @@ func (s *SQLite) AddAllowedUser(ctx context.Context, u AllowedUser) error {
 
 func (s *SQLite) RemoveAllowedUser(ctx context.Context, userID int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM allowed_users WHERE user_id = ?`, userID)
+	return err
+}
+
+// --- forum topics ---
+
+func (s *SQLite) GetForumTopic(ctx context.Context, name string) (int, bool, error) {
+	var id int
+	err := s.db.QueryRowContext(ctx, `SELECT thread_id FROM forum_topics WHERE name = ?`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
+}
+
+func (s *SQLite) SetForumTopic(ctx context.Context, name string, threadID int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO forum_topics (name, thread_id) VALUES (?, ?)
+		 ON CONFLICT(name) DO UPDATE SET thread_id = excluded.thread_id`,
+		name, threadID)
 	return err
 }
 

@@ -35,6 +35,49 @@ func cancelRow() []models.InlineKeyboardButton {
 	return []models.InlineKeyboardButton{{Text: "✖️ Отмена", CallbackData: "cancel"}}
 }
 
+// mainMenu is the single entry-point menu for the admin.
+func mainMenu() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "🎲 Ролл", CallbackData: "menu:roll"}},
+		{
+			{Text: "📦 Пул", CallbackData: "menu:pool"},
+			{Text: "📊 Лимиты", CallbackData: "menu:limits"},
+		},
+		{{Text: "🔐 Аккаунты", CallbackData: "menu:accounts"}},
+	}}
+}
+
+func backToMenuRow() []models.InlineKeyboardButton {
+	return []models.InlineKeyboardButton{{Text: "⬅️ Меню", CallbackData: "menu:back"}}
+}
+
+// accountsMenu lists accounts with per-account toggle/delete and an add button.
+func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	for _, a := range accs {
+		flag := "✅"
+		if !a.Enabled {
+			flag = "⛔"
+		}
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: fmt.Sprintf("%s %s", flag, a.Display), CallbackData: fmt.Sprintf("acc:toggle:%d", a.ID)},
+			{Text: "🗑", CallbackData: fmt.Sprintf("acc:del:%d", a.ID)},
+		})
+	}
+	rows = append(rows,
+		[]models.InlineKeyboardButton{{Text: "➕ Добавить (гайд)", CallbackData: "acc:addhelp"}},
+		backToMenuRow(),
+	)
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// accountRow is the minimal account view the keyboard needs.
+type accountRow struct {
+	ID      int64
+	Display string
+	Enabled bool
+}
+
 // providerKeyboard lists enabled accounts, one per row (labels can be long).
 func providerKeyboard(accs []*provider.Account) *models.InlineKeyboardMarkup {
 	var rows [][]models.InlineKeyboardButton
