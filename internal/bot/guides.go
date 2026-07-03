@@ -82,6 +82,80 @@ var providerGuides = map[string]providerGuide{
 	},
 }
 
+// fieldHints gives a one-line, idiot-proof explanation for every credential
+// field, shown at each step of the button-driven add-account wizard. Optional
+// fields say so and mention their default.
+var fieldHints = map[string]map[string]string{
+	"timeweb": {
+		"token":             "API-токен: панель timeweb.cloud → «API и Terraform» → «Создать токен».",
+		"availability_zone": "Зона сервера, напр. spb-1 или msk-1. Необязательно — можно пропустить.",
+	},
+	"vkcloud": {
+		"app_credential_id":     "ID из «Управление доступом» → Application credentials → «Добавить».",
+		"app_credential_secret": "Secret оттуда же (показывается ОДИН раз при создании!).",
+		"floating_network_id":   "ID внешней сети: раздел «Сети» → «Внешние сети».",
+		"auth_url":              "Обычно https://infra.mail.ru:35357/v3. Необязательно — можно пропустить.",
+		"region":                "Обычно RegionOne. Необязательно — можно пропустить.",
+	},
+	"selectel": {
+		"account_id":          "Номер аккаунта Selectel (показан вверху панели my.selectel.ru).",
+		"service_user":        "Имя сервисного пользователя («Управление доступом» → «Сервисные пользователи»).",
+		"service_password":    "Пароль этого сервисного пользователя.",
+		"project_id":          "ID проекта, в котором роллим.",
+		"floating_network_id": "ID внешней сети проекта.",
+		"auth_url":            "По умолчанию https://cloud.api.selcloud.ru/identity/v3. Необязательно.",
+		"region":              "Напр. ru-9. Необязательно — можно пропустить.",
+	},
+	"gcore": {
+		"api_token":  "Токен: Customer Portal → Account → «API tokens» → создать.",
+		"project_id": "ID проекта (раздел Cloud / из URL проекта).",
+		"region_id":  "Число региона, напр. 7.",
+		"api_url":    "Обычно дефолтный. Необязательно — можно пропустить.",
+	},
+	"mws": {
+		"token":         "Токен сервисного аккаунта / API из панели MWS.",
+		"project_id":    "ID проекта.",
+		"network_id":    "ID сети проекта (раздел «Сети»).",
+		"subnetwork_id": "ID подсети проекта.",
+	},
+	"ruvds": {
+		"token":     "Токен: Личный кабинет → «Настройки» → «Информация API».",
+		"server_id": "ID сервера, который будем роллить. ⚠️ роллинг = пересоздание/доп. IP (платно).",
+	},
+	"beget": {
+		"token":     "Bearer-токен облачного API (developer.beget.com).",
+		"server_id": "ID твоего VPS. ⚠️ роллинг = заказ доп. IPv4 / пересоздание (платно).",
+		"api_url":   "Обычно дефолтный. Необязательно — можно пропустить.",
+	},
+}
+
+// fieldHint returns the human hint for a field, or a generic fallback.
+func fieldHint(typ, name string) string {
+	if m, ok := fieldHints[typ]; ok {
+		if h, ok := m[name]; ok {
+			return h
+		}
+	}
+	return "Введи значение поля " + name + "."
+}
+
+// guideStepsHTML renders just the "where to get the credentials" steps for a
+// provider type as an expandable blockquote — used at the start of the
+// button-driven wizard (no /addaccount command example).
+func guideStepsHTML(typ string) string {
+	g, ok := providerGuides[typ]
+	if !ok {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("<blockquote expandable>📖 Где взять креды:\n")
+	for i, s := range g.steps {
+		fmt.Fprintf(&sb, "%d. %s\n", i+1, htmlEsc(s))
+	}
+	sb.WriteString("</blockquote>")
+	return sb.String()
+}
+
 // guideHTML renders the per-type credential guide as a Telegram HTML message
 // (blockquote for the steps, code for the command).
 func guideHTML(typ string) string {

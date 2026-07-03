@@ -6,6 +6,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"ip-roller-bot/internal/provider"
+	"ip-roller-bot/internal/registry"
 )
 
 // typeNames maps provider type to a pretty label.
@@ -65,10 +66,54 @@ func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
 		})
 	}
 	rows = append(rows,
-		[]models.InlineKeyboardButton{{Text: "➕ Добавить (гайд)", CallbackData: "acc:addhelp"}},
+		[]models.InlineKeyboardButton{{Text: "➕ Добавить аккаунт", CallbackData: "acc:add"}},
 		backToMenuRow(),
 	)
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// addTypeKeyboard lists provider types for the first step of the add wizard.
+func addTypeKeyboard() *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	row := []models.InlineKeyboardButton{}
+	for _, t := range registry.Types {
+		row = append(row, models.InlineKeyboardButton{Text: typeName(t), CallbackData: "addtype:" + t})
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = []models.InlineKeyboardButton{}
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}})
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// addFieldKeyboard is shown while collecting one credential field: a skip button
+// for optional fields plus a cancel that returns to the accounts view.
+func addFieldKeyboard(optional bool) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	if optional {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: "⏭ Пропустить", CallbackData: "addskip"}})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "✖️ Отмена", CallbackData: "acc:cancel"}})
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// addCancelKeyboard is a lone cancel row (label step) returning to accounts.
+func addCancelKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "✖️ Отмена", CallbackData: "acc:cancel"}},
+	}}
+}
+
+// addDoneKeyboard is shown after an account is saved.
+func addDoneKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "➕ Ещё аккаунт", CallbackData: "acc:add"}},
+		{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}},
+	}}
 }
 
 // accountRow is the minimal account view the keyboard needs.

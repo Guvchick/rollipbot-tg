@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"log/slog"
@@ -41,6 +42,11 @@ type Handler struct {
 	notifier *notify.Notifier
 	fsm      *FSM
 	log      *slog.Logger
+
+	// pinned main-menu message id per chat, so re-opening the menu unpins the
+	// stale one instead of stacking pins.
+	menuMu  sync.Mutex
+	menuMsg map[int64]int
 }
 
 // Run builds the bot and blocks until ctx is cancelled.
@@ -58,7 +64,7 @@ func Run(
 		log.Warn("доступ не ограничен (нет admin_user_ids/allowed_user_ids/whitelist) — бот ответит любому")
 	}
 
-	h := &Handler{cfg: cfg, engine: eng, store: store, reg: reg, acl: acl, notifier: notifier, fsm: NewFSM(), log: log}
+	h := &Handler{cfg: cfg, engine: eng, store: store, reg: reg, acl: acl, notifier: notifier, fsm: NewFSM(), log: log, menuMsg: map[int64]int{}}
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(h.onText),
@@ -83,6 +89,9 @@ func Run(
 		// menu + account management callbacks
 		bot.WithCallbackQueryDataHandler("menu:", bot.MatchTypePrefix, h.cbMenu),
 		bot.WithCallbackQueryDataHandler("acc:", bot.MatchTypePrefix, h.cbAccount),
+		// add-account wizard callbacks
+		bot.WithCallbackQueryDataHandler("addtype:", bot.MatchTypePrefix, h.cbAddType),
+		bot.WithCallbackQueryDataHandler("addskip", bot.MatchTypeExact, h.cbAddSkip),
 		// roll wizard callbacks
 		bot.WithCallbackQueryDataHandler("prov:", bot.MatchTypePrefix, h.cbProvider),
 		bot.WithCallbackQueryDataHandler("mask:", bot.MatchTypePrefix, h.cbMask),
@@ -96,6 +105,15 @@ func Run(
 	b, err := bot.New(cfg.Telegram.Token, opts...)
 	if err != nil {
 		return fmt.Errorf("create bot: %w", err)
+	}
+	// Keep the "/" hint list short — the primary UI is the pinned button menu.
+	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: []models.BotCommand{
+		{Command: "start", Description: "Открыть меню (закрепить)"},
+		{Command: "menu", Description: "Показать меню"},
+		{Command: "roll", Description: "Запустить ролл IP"},
+		{Command: "cancel", Description: "Отменить текущий диалог"},
+	}}); err != nil {
+		log.Debug("set my commands failed", "err", err)
 	}
 	log.Info("bot запущен", "accounts", reg.Len())
 	b.Start(ctx)
@@ -191,6 +209,21 @@ func (h *Handler) edit(ctx context.Context, b *bot.Bot, chatID int64, msgID int,
 	}
 }
 
+// editHTML edits a message with HTML markup, falling back to a plain-text edit
+// (tags stripped) if Telegram rejects the markup.
+func (h *Handler) editHTML(ctx context.Context, b *bot.Bot, chatID int64, msgID int, text string, kb models.ReplyMarkup) {
+	if msgID == 0 {
+		h.sendHTML(ctx, b, chatID, text)
+		return
+	}
+	if _, err := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID: chatID, MessageID: msgID, Text: text, ParseMode: models.ParseModeHTML, ReplyMarkup: kb,
+	}); err != nil {
+		h.log.Debug("edit html failed, retrying plain", "err", err)
+		h.edit(ctx, b, chatID, msgID, stripTags(text), kb)
+	}
+}
+
 func (h *Handler) ack(ctx context.Context, b *bot.Bot, q *models.CallbackQuery) {
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
 }
@@ -214,18 +247,49 @@ func (h *Handler) cmdMenu(ctx context.Context, b *bot.Bot, u *models.Update) {
 	h.sendMenu(ctx, b, u.Message.Chat.ID)
 }
 
-func (h *Handler) sendMenu(ctx context.Context, b *bot.Bot, chatID int64) {
+// menuText is the main-menu body (HTML), shared by the pinned message and the
+// "back to menu" navigation.
+func (h *Handler) menuText() string {
 	text := "👋 <b>IP-Roller</b> — главное меню\n" +
 		"Роллю публичные/floating IP до попадания в маску.\n\n" +
-		"Всё управление — кнопками ниже. Текстовые команды тоже работают " +
-		"(/roll, /pool, /limits, /attach, /addaccount)."
+		"Всё управление — кнопками ниже. Это меню закреплено — открывай его в " +
+		"любой момент из закреплённого сообщения."
 	if h.notifier.Enabled() {
 		text += "\n\n🔔 Уведомления о ловле идут в форум-группу (по топикам на аккаунт)."
 	}
-	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID, Text: text, ParseMode: models.ParseModeHTML, ReplyMarkup: mainMenu(),
-	}); err != nil {
+	return text
+}
+
+func (h *Handler) sendMenu(ctx context.Context, b *bot.Bot, chatID int64) {
+	m, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID, Text: h.menuText(), ParseMode: models.ParseModeHTML, ReplyMarkup: mainMenu(),
+	})
+	if err != nil {
 		h.log.Warn("sendMenu failed", "err", err)
+		return
+	}
+	h.pinMenu(ctx, b, chatID, m.ID)
+}
+
+// pinMenu pins the new menu message and unpins the previous one so the pinned
+// control panel stays fresh instead of stacking. Pinning failures (e.g. missing
+// rights in a group) are non-fatal — the menu still works from the message.
+func (h *Handler) pinMenu(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
+	h.menuMu.Lock()
+	prev := h.menuMsg[chatID]
+	h.menuMsg[chatID] = msgID
+	h.menuMu.Unlock()
+
+	if _, err := b.PinChatMessage(ctx, &bot.PinChatMessageParams{
+		ChatID: chatID, MessageID: msgID, DisableNotification: true,
+	}); err != nil {
+		h.log.Debug("pin menu failed", "err", err)
+		return
+	}
+	if prev != 0 && prev != msgID {
+		if _, err := b.UnpinChatMessage(ctx, &bot.UnpinChatMessageParams{ChatID: chatID, MessageID: prev}); err != nil {
+			h.log.Debug("unpin previous menu failed", "err", err)
+		}
 	}
 }
 
@@ -547,7 +611,8 @@ func (h *Handler) cbMenu(ctx context.Context, b *bot.Bot, u *models.Update) {
 		}
 		h.editAccountsMenu(ctx, b, chatID, msgID)
 	case "back":
-		h.edit(ctx, b, chatID, msgID, "👋 IP-Roller — главное меню", mainMenu())
+		h.fsm.Clear(chatID)
+		h.editHTML(ctx, b, chatID, msgID, h.menuText(), mainMenu())
 	}
 }
 
@@ -561,7 +626,14 @@ func (h *Handler) cbAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
 	data := strings.TrimPrefix(q.Data, "acc:")
 
 	switch {
-	case data == "addhelp":
+	case data == "add":
+		h.startAddWizard(ctx, b, chatID, msgID)
+		return
+	case data == "list", data == "cancel":
+		h.fsm.Clear(chatID)
+		h.editAccountsMenu(ctx, b, chatID, msgID)
+		return
+	case data == "addhelp": // legacy: text /addaccount help
 		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
 		return
 	case strings.HasPrefix(data, "toggle:"):
@@ -697,8 +769,12 @@ func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.acceptBudget(ctx, b, chatID, st.MsgID, text)
 	case stepAttachVM:
 		h.acceptAttachVM(ctx, b, chatID, text)
+	case stepAddLabel:
+		h.acceptAddLabel(ctx, b, chatID, st.MsgID, text)
+	case stepAddField:
+		h.acceptAddField(ctx, b, chatID, u.Message.ID, text)
 	default:
-		h.send(ctx, b, chatID, "Чтобы начать — /roll.")
+		h.send(ctx, b, chatID, "Открой меню кнопкой ниже или пришли /start.")
 	}
 }
 

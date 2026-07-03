@@ -1,6 +1,10 @@
 package bot
 
-import "sync"
+import (
+	"sync"
+
+	"ip-roller-bot/internal/registry"
+)
 
 // step is the current stage of the /roll dialog for a chat.
 type step int
@@ -14,6 +18,9 @@ const (
 	stepRunning
 	stepResult
 	stepAttachVM
+	// add-account wizard
+	stepAddLabel // waiting for the account label
+	stepAddField // waiting for the current credential field value
 )
 
 // dialogState is the per-chat conversation state.
@@ -28,6 +35,13 @@ type dialogState struct {
 	ResultIP     string
 	ResultResID  string
 	ResultPoolID int64
+
+	// add-account wizard
+	AddType   string            // provider type being added
+	AddLabel  string            // chosen human label
+	AddFields []registry.Field  // credential schema for the type
+	AddIdx    int               // index of the field currently being collected
+	AddCreds  map[string]string // collected credential values
 }
 
 // FSM holds dialog state per chat behind a mutex.
