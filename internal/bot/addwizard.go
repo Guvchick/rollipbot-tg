@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -13,10 +14,11 @@ import (
 	"ip-roller-bot/internal/storage"
 )
 
-// The add-account wizard collects one credential field at a time via buttons and
-// plain-text replies, so the admin never has to hand-write JSON. It runs inside
-// the accounts control-panel message (edited in place) and deletes the user's
-// replies that carry secrets.
+// The add-account wizard collects the credentials first (one field at a time,
+// via plain-text replies) and asks for an optional label last, so the admin can
+// pick a provider and immediately paste the token — no JSON, no upfront naming.
+// It runs inside the accounts control-panel message (edited in place) and tries
+// to delete replies that carry secrets.
 
 // startAddWizard shows the provider-type picker (step 0 of the wizard).
 func (h *Handler) startAddWizard(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
@@ -25,7 +27,8 @@ func (h *Handler) startAddWizard(ctx context.Context, b *bot.Bot, chatID int64, 
 	h.editHTML(ctx, b, chatID, msgID, text, addTypeKeyboard())
 }
 
-// cbAddType begins the field-by-field wizard for the chosen provider type.
+// cbAddType begins the field-by-field wizard for the chosen provider type,
+// asking for the first credential right away.
 func (h *Handler) cbAddType(ctx context.Context, b *bot.Bot, u *models.Update) {
 	q := u.CallbackQuery
 	if !h.requireAdminCB(ctx, b, q) {
@@ -40,7 +43,7 @@ func (h *Handler) cbAddType(ctx context.Context, b *bot.Bot, u *models.Update) {
 	}
 	h.fsm.Update(chatID, func(s *dialogState) {
 		*s = dialogState{
-			Step:      stepAddLabel,
+			Step:      stepAddField,
 			MsgID:     msgID,
 			AddType:   typ,
 			AddFields: registry.Fields(typ),
@@ -48,48 +51,15 @@ func (h *Handler) cbAddType(ctx context.Context, b *bot.Bot, u *models.Update) {
 			AddCreds:  map[string]string{},
 		}
 	})
-	h.editHTML(ctx, b, chatID, msgID, h.addLabelPrompt(typ), addCancelKeyboard())
-}
-
-// addLabelPrompt builds the "choose a label" step (step 1), with the credential
-// guide embedded as an expandable blockquote.
-func (h *Handler) addLabelPrompt(typ string) string {
-	total := len(registry.Fields(typ)) + 1
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "➕ <b>Добавление: %s</b>\n", htmlEsc(typeName(typ)))
-	if g := guideStepsHTML(typ); g != "" {
-		sb.WriteString(g + "\n")
-	}
-	fmt.Fprintf(&sb, "Шаг 1/%d — придумай короткое название (label), напр. <code>prod</code> или <code>личный</code>.\n", total)
-	sb.WriteString("Пришли название одним сообщением.")
-	return sb.String()
-}
-
-// acceptAddLabel stores the label and asks for the first credential field.
-func (h *Handler) acceptAddLabel(ctx context.Context, b *bot.Bot, chatID int64, msgID int, label string) {
-	label = strings.TrimSpace(label)
-	if label == "" {
-		h.send(ctx, b, chatID, "Название не может быть пустым. Пришли ещё раз.")
-		return
-	}
-	if len(label) > 40 {
-		h.send(ctx, b, chatID, "Слишком длинное название (макс. 40 символов). Пришли короче.")
-		return
-	}
-	h.fsm.Update(chatID, func(s *dialogState) {
-		s.Step = stepAddField
-		s.AddLabel = label
-		s.AddIdx = 0
-	})
 	h.promptAddField(ctx, b, chatID, msgID)
 }
 
-// promptAddField edits the wizard message to ask for the current field, or
-// finalizes the wizard when all fields have been collected.
+// promptAddField edits the wizard message to ask for the current credential
+// field, or moves on to the (optional) label step once all fields are done.
 func (h *Handler) promptAddField(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
 	st := h.fsm.Get(chatID)
 	if st.AddIdx >= len(st.AddFields) {
-		h.finalizeAddWizard(ctx, b, chatID, msgID)
+		h.promptAddLabel(ctx, b, chatID, msgID)
 		return
 	}
 	f := st.AddFields[st.AddIdx]
@@ -99,16 +69,22 @@ func (h *Handler) promptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 		kind = "необязательное"
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "➕ <b>%s · %s</b>\n", htmlEsc(typeName(st.AddType)), htmlEsc(st.AddLabel))
-	fmt.Fprintf(&sb, "Шаг %d/%d — поле <b>%s</b> (%s)\n", st.AddIdx+2, total, htmlEsc(f.Name), kind)
+	fmt.Fprintf(&sb, "➕ <b>Добавление: %s</b>\n", htmlEsc(typeName(st.AddType)))
+	// Show the "where to get creds" guide once, on the very first field.
+	if st.AddIdx == 0 {
+		if g := guideStepsHTML(st.AddType); g != "" {
+			sb.WriteString(g + "\n")
+		}
+	}
+	fmt.Fprintf(&sb, "Шаг %d/%d — поле <b>%s</b> (%s)\n", st.AddIdx+1, total, htmlEsc(f.Name), kind)
 	fmt.Fprintf(&sb, "💡 %s\n", htmlEsc(fieldHint(st.AddType, f.Name)))
 	if f.Secret {
-		sb.WriteString("🔒 Сообщение с этим значением я удалю из чата.\n")
+		sb.WriteString("🔒 Это секрет — постараюсь удалить твоё сообщение после ввода.\n")
 	}
 	if f.Required {
-		sb.WriteString("Пришли значение одним сообщением.")
+		sb.WriteString("👉 Пришли значение обычным сообщением в чат (можно вставить из буфера).")
 	} else {
-		sb.WriteString("Пришли значение или нажми «Пропустить».")
+		sb.WriteString("👉 Пришли значение сообщением или нажми «Пропустить».")
 	}
 	h.editHTML(ctx, b, chatID, msgID, sb.String(), addFieldKeyboard(!f.Required))
 }
@@ -118,7 +94,7 @@ func (h *Handler) promptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, userMsgID int, value string) {
 	st := h.fsm.Get(chatID)
 	if st.AddIdx >= len(st.AddFields) {
-		h.finalizeAddWizard(ctx, b, chatID, st.MsgID)
+		h.promptAddLabel(ctx, b, chatID, st.MsgID)
 		return
 	}
 	f := st.AddFields[st.AddIdx]
@@ -133,7 +109,9 @@ func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 			return
 		}
 	}
-	// Hygiene: drop the user's message when it carried a secret.
+	// Hygiene: try to drop the user's message when it carried a secret. In
+	// private chats Telegram forbids deleting the user's own messages, so this
+	// may fail — that's fine, we just log it.
 	if f.Secret && userMsgID != 0 {
 		if _, err := b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: userMsgID}); err != nil {
 			h.log.Debug("delete secret field message", "err", err)
@@ -146,7 +124,36 @@ func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 	h.promptAddField(ctx, b, chatID, st.MsgID)
 }
 
-// cbAddSkip skips the current optional field.
+// promptAddLabel asks for an optional human label (last step). It can be skipped
+// — the wizard then picks a unique default name.
+func (h *Handler) promptAddLabel(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
+	st := h.fsm.Get(chatID)
+	total := len(st.AddFields) + 1
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "➕ <b>Добавление: %s</b> — почти готово!\n", htmlEsc(typeName(st.AddType)))
+	fmt.Fprintf(&sb, "Шаг %d/%d — придумай короткое название (label), напр. <code>prod</code> или <code>личный</code>.\n", total, total)
+	sb.WriteString("👉 Пришли название сообщением или нажми «Пропустить» — назову сам.")
+	h.fsm.Update(chatID, func(s *dialogState) { s.Step = stepAddLabel })
+	h.editHTML(ctx, b, chatID, msgID, sb.String(), addLabelKeyboard())
+}
+
+// acceptAddLabel stores the chosen label and finalizes the wizard.
+func (h *Handler) acceptAddLabel(ctx context.Context, b *bot.Bot, chatID int64, msgID int, label string) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		h.send(ctx, b, chatID, "Название пустое. Пришли ещё раз или нажми «Пропустить».")
+		return
+	}
+	if len(label) > 40 {
+		h.send(ctx, b, chatID, "Слишком длинное название (макс. 40 символов). Пришли короче или нажми «Пропустить».")
+		return
+	}
+	h.fsm.Update(chatID, func(s *dialogState) { s.AddLabel = label })
+	h.finalizeAddWizard(ctx, b, chatID, msgID)
+}
+
+// cbAddSkip skips the current optional field, or (on the label step) accepts a
+// default label and finalizes.
 func (h *Handler) cbAddSkip(ctx context.Context, b *bot.Bot, u *models.Update) {
 	q := u.CallbackQuery
 	if !h.requireAdminCB(ctx, b, q) {
@@ -155,39 +162,79 @@ func (h *Handler) cbAddSkip(ctx context.Context, b *bot.Bot, u *models.Update) {
 	h.ack(ctx, b, q)
 	chatID, msgID := cbChatMsg(q)
 	st := h.fsm.Get(chatID)
-	if st.Step != stepAddField || st.AddIdx >= len(st.AddFields) {
-		return
+	switch st.Step {
+	case stepAddLabel:
+		h.finalizeAddWizard(ctx, b, chatID, msgID) // empty label → auto default
+	case stepAddField:
+		if st.AddIdx >= len(st.AddFields) {
+			return
+		}
+		if st.AddFields[st.AddIdx].Required {
+			_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+				CallbackQueryID: q.ID, Text: "Это поле обязательное — его нельзя пропустить.", ShowAlert: true,
+			})
+			return
+		}
+		h.fsm.Update(chatID, func(s *dialogState) { s.AddIdx++ })
+		h.promptAddField(ctx, b, chatID, msgID)
 	}
-	if st.AddFields[st.AddIdx].Required {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-			CallbackQueryID: q.ID, Text: "Это поле обязательное — его нельзя пропустить.", ShowAlert: true,
-		})
-		return
-	}
-	h.fsm.Update(chatID, func(s *dialogState) { s.AddIdx++ })
-	h.promptAddField(ctx, b, chatID, msgID)
 }
 
-// finalizeAddWizard validates the collected credentials, saves the account and
-// reloads the registry.
+// finalizeAddWizard validates the collected credentials, saves the account
+// (auto-naming when no label was given) and reloads the registry.
 func (h *Handler) finalizeAddWizard(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
 	st := h.fsm.Get(chatID)
 	typ, label, creds := st.AddType, st.AddLabel, st.AddCreds
 	h.fsm.Clear(chatID)
+	if label == "" {
+		label = h.uniqueLabel(ctx, typ)
+	}
 
-	if err := registry.ValidateCreds(typ, creds); err != nil {
-		h.editHTML(ctx, b, chatID, msgID, "⚠️ Ошибка проверки кред: "+htmlEsc(err.Error())+"\nНачни добавление заново.", addDoneKeyboard())
-		return
-	}
-	id, err := h.store.UpsertAccount(ctx, storage.Account{Provider: typ, Label: label, Enabled: true, Credentials: creds})
+	id, err := h.persistAccount(ctx, typ, label, creds)
 	if err != nil {
-		h.editHTML(ctx, b, chatID, msgID, "⚠️ Не удалось сохранить: "+htmlEsc(err.Error()), addDoneKeyboard())
+		h.editHTML(ctx, b, chatID, msgID, "⚠️ Не удалось сохранить: "+htmlEsc(err.Error())+"\nНачни добавление заново.", addDoneKeyboard())
 		return
-	}
-	if err := h.reg.Reload(ctx); err != nil {
-		h.log.Warn("reload after add wizard", "err", err)
 	}
 	text := fmt.Sprintf("✅ <b>Аккаунт сохранён</b>\n#%d %s · %s\n<blockquote>%s</blockquote>\nМожно запускать 🎲 Ролл.",
 		id, htmlEsc(typeName(typ)), htmlEsc(label), htmlEsc(maskCreds(typ, creds)))
 	h.editHTML(ctx, b, chatID, msgID, text, addDoneKeyboard())
+}
+
+// persistAccount validates credentials, upserts the account and reloads the
+// registry. Shared by the wizard and the /addaccount command.
+func (h *Handler) persistAccount(ctx context.Context, typ, label string, creds map[string]string) (int64, error) {
+	if err := registry.ValidateCreds(typ, creds); err != nil {
+		return 0, err
+	}
+	id, err := h.store.UpsertAccount(ctx, storage.Account{Provider: typ, Label: label, Enabled: true, Credentials: creds})
+	if err != nil {
+		return 0, err
+	}
+	if err := h.reg.Reload(ctx); err != nil {
+		h.log.Warn("reload after add account", "err", err)
+	}
+	return id, nil
+}
+
+// uniqueLabel returns a free "default"-style label for a provider type so
+// auto-named accounts never collide with (and overwrite) an existing one.
+func (h *Handler) uniqueLabel(ctx context.Context, typ string) string {
+	used := map[string]bool{}
+	if accs, err := h.store.ListAccounts(ctx); err == nil {
+		for _, a := range accs {
+			if a.Provider == typ {
+				used[a.Label] = true
+			}
+		}
+	}
+	if !used["default"] {
+		return "default"
+	}
+	for i := 2; i < 1000; i++ {
+		c := fmt.Sprintf("default-%d", i)
+		if !used[c] {
+			return c
+		}
+	}
+	return fmt.Sprintf("default-%d", time.Now().Unix())
 }

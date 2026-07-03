@@ -101,9 +101,11 @@ func addFieldKeyboard(optional bool) *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// addCancelKeyboard is a lone cancel row (label step) returning to accounts.
-func addCancelKeyboard() *models.InlineKeyboardMarkup {
+// addLabelKeyboard is shown on the final (label) step: skip to auto-name, or
+// cancel back to the accounts view.
+func addLabelKeyboard() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "⏭ Пропустить (назову сам)", CallbackData: "addskip"}},
 		{{Text: "✖️ Отмена", CallbackData: "acc:cancel"}},
 	}}
 }

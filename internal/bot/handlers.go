@@ -424,15 +424,22 @@ func (h *Handler) accountsView(ctx context.Context) (string, *models.InlineKeybo
 	return sb.String(), accountsMenu(rows)
 }
 
-// cmdAddAccount: /addaccount <provider> <label> <json-creds>
+// cmdAddAccount handles the text command. Accepted shapes:
+//
+//	/addaccount                          → general help
+//	/addaccount <type>                   → per-type "where to get creds" guide
+//	/addaccount <type> <token>           → bare secret (types with one required field)
+//	/addaccount <type> <label> <token>   → bare secret with an explicit label
+//	/addaccount <type> <label> <json>    → full JSON credentials
+//
+// The button wizard (🔐 Аккаунты → ➕) is the friendlier path; this stays for
+// power users and old muscle memory.
 func (h *Handler) cmdAddAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
 	if !h.requireAdmin(ctx, b, u) {
 		return
 	}
 	chatID := u.Message.Chat.ID
 	rest := strings.TrimSpace(strings.TrimPrefix(u.Message.Text, "/addaccount"))
-
-	// no type → general help (с подсказкой про гайды)
 	if rest == "" {
 		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
 		return
@@ -443,39 +450,86 @@ func (h *Handler) cmdAddAccount(ctx context.Context, b *bot.Bot, u *models.Updat
 		h.send(ctx, b, chatID, "Неизвестный тип: "+typ+"\nДоступные: "+strings.Join(registry.Types, ", "))
 		return
 	}
-	// только тип (или тип+label) → показываем пошаговый гайд «где что взять»
-	if len(parts) < 3 {
-		h.sendHTML(ctx, b, chatID, guideHTML(typ))
-		return
-	}
-	label, raw := parts[1], strings.TrimSpace(parts[2])
 
-	var creds map[string]string
-	if err := json.Unmarshal([]byte(raw), &creds); err != nil {
-		h.send(ctx, b, chatID, "Не удалось разобрать JSON кред: "+err.Error())
+	var label, credsArg string
+	switch len(parts) {
+	case 1:
+		// just the type → walkthrough. If it only needs a token, say so.
 		h.sendHTML(ctx, b, chatID, guideHTML(typ))
+		if f := singleRequiredField(typ); f != "" {
+			h.send(ctx, b, chatID, fmt.Sprintf("Проще всего: 🔐 Аккаунты → ➕, либо пришли одним сообщением:\n/addaccount %s <твой_%s>", typ, f))
+		}
 		return
+	case 2:
+		// type + one arg: treat it as a pasted token only if it looks like one,
+		// otherwise it's a label with no creds yet → show the guide.
+		if f := singleRequiredField(typ); f != "" && looksLikeToken(parts[1]) {
+			label, credsArg = h.uniqueLabel(ctx, typ), parts[1]
+		} else {
+			h.sendHTML(ctx, b, chatID, guideHTML(typ))
+			return
+		}
+	default:
+		label, credsArg = parts[1], strings.TrimSpace(parts[2])
 	}
-	if err := registry.ValidateCreds(typ, creds); err != nil {
+
+	creds, err := parseCredsArg(typ, credsArg)
+	if err != nil {
 		h.send(ctx, b, chatID, "Ошибка кред: "+err.Error())
 		h.sendHTML(ctx, b, chatID, guideHTML(typ))
 		return
 	}
-	id, err := h.store.UpsertAccount(ctx, storage.Account{Provider: typ, Label: label, Enabled: true, Credentials: creds})
+	id, err := h.persistAccount(ctx, typ, label, creds)
 	if err != nil {
 		h.send(ctx, b, chatID, "Не удалось сохранить: "+err.Error())
+		h.sendHTML(ctx, b, chatID, guideHTML(typ))
 		return
 	}
-	if err := h.reg.Reload(ctx); err != nil {
-		h.log.Warn("reload after addaccount", "err", err)
-	}
-	// сообщение содержит секреты — пытаемся удалить его из чата
+	// The message carried secrets — try to delete it from the chat.
 	hygiene := "\n(исходное сообщение с кредами удалил)"
 	if _, err := b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: u.Message.ID}); err != nil {
 		h.log.Debug("delete addaccount message", "err", err)
 		hygiene = "\n⚠️ не смог удалить твоё сообщение с кредами — удали его вручную"
 	}
 	h.send(ctx, b, chatID, fmt.Sprintf("✅ Аккаунт сохранён: #%d %s · %s%s", id, typeName(typ), label, hygiene))
+}
+
+// singleRequiredField returns the sole required credential field for a type, or
+// "" when it needs zero or several required fields.
+func singleRequiredField(typ string) string {
+	var req []string
+	for _, f := range registry.Fields(typ) {
+		if f.Required {
+			req = append(req, f.Name)
+		}
+	}
+	if len(req) == 1 {
+		return req[0]
+	}
+	return ""
+}
+
+// looksLikeToken heuristically tells a pasted secret from a short label.
+func looksLikeToken(s string) bool {
+	return len(s) > 40 || strings.Contains(s, ".")
+}
+
+// parseCredsArg interprets the credential argument: a JSON object, or a single
+// bare value when the type has exactly one required field.
+func parseCredsArg(typ, arg string) (map[string]string, error) {
+	arg = strings.TrimSpace(arg)
+	if strings.HasPrefix(arg, "{") {
+		var creds map[string]string
+		if err := json.Unmarshal([]byte(arg), &creds); err != nil {
+			return nil, fmt.Errorf("не удалось разобрать JSON: %w", err)
+		}
+		return creds, nil
+	}
+	field := singleRequiredField(typ)
+	if field == "" {
+		return nil, fmt.Errorf("для %s нужно несколько полей — пришли JSON или добавь через меню 🔐 → ➕", typ)
+	}
+	return map[string]string{field: arg}, nil
 }
 
 func (h *Handler) cmdDelAccount(ctx context.Context, b *bot.Bot, u *models.Update) {

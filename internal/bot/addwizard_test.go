@@ -1,12 +1,14 @@
 package bot
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/go-telegram/bot/models"
 
 	"ip-roller-bot/internal/registry"
+	"ip-roller-bot/internal/storage"
 )
 
 // Every credential field of every provider must have a specific wizard hint, so
@@ -89,4 +91,74 @@ func hasCallback(kb *models.InlineKeyboardMarkup, data string) bool {
 		}
 	}
 	return false
+}
+
+func TestSingleRequiredField(t *testing.T) {
+	if got := singleRequiredField("timeweb"); got != "token" {
+		t.Errorf("timeweb single required = %q, want token", got)
+	}
+	// providers with several required fields have no single bare-token shortcut
+	for _, typ := range []string{"vkcloud", "selectel", "gcore", "mws", "ruvds", "beget"} {
+		if got := singleRequiredField(typ); got != "" {
+			t.Errorf("%s should have no single required field, got %q", typ, got)
+		}
+	}
+}
+
+func TestLooksLikeToken(t *testing.T) {
+	jwt := "eyJhbGciOiJSUzUxMiJ9.eyJ1c2VyIjoibWI3MzM2OCJ9.O2MeOvUBYffqQ2wXK10cJfh5"
+	if !looksLikeToken(jwt) {
+		t.Error("JWT should look like a token")
+	}
+	if looksLikeToken("prod") {
+		t.Error("short plain label must not look like a token")
+	}
+	if !looksLikeToken(strings.Repeat("a", 41)) {
+		t.Error("long string should look like a token")
+	}
+}
+
+func TestParseCredsArg(t *testing.T) {
+	// JSON form
+	creds, err := parseCredsArg("vkcloud", `{"app_credential_id":"a","app_credential_secret":"b","floating_network_id":"c"}`)
+	if err != nil || creds["app_credential_id"] != "a" {
+		t.Fatalf("json parse failed: %v %v", creds, err)
+	}
+	// bare token for a single-required-field type
+	creds, err = parseCredsArg("timeweb", "eyJ.tokenlike.value")
+	if err != nil || creds["token"] != "eyJ.tokenlike.value" {
+		t.Fatalf("bare token parse failed: %v %v", creds, err)
+	}
+	// bare value rejected for a multi-field type
+	if _, err := parseCredsArg("vkcloud", "justatoken"); err == nil {
+		t.Error("multi-field type must reject a bare value")
+	}
+}
+
+func TestAddLabelKeyboardIsSkippable(t *testing.T) {
+	kb := addLabelKeyboard()
+	if !hasCallback(kb, "addskip") {
+		t.Error("label step must offer a skip button")
+	}
+	if !hasCallback(kb, "acc:cancel") {
+		t.Error("label step must offer cancel")
+	}
+}
+
+func TestUniqueLabelAvoidsCollisions(t *testing.T) {
+	ctx := context.Background()
+	h := &Handler{store: aclStore(t)}
+	if got := h.uniqueLabel(ctx, "timeweb"); got != "default" {
+		t.Fatalf("first label = %q, want default", got)
+	}
+	if _, err := h.store.UpsertAccount(ctx, storage.Account{Provider: "timeweb", Label: "default", Enabled: true, Credentials: map[string]string{"token": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.uniqueLabel(ctx, "timeweb"); got != "default-2" {
+		t.Errorf("second label = %q, want default-2", got)
+	}
+	// a different provider type is unaffected
+	if got := h.uniqueLabel(ctx, "beget"); got != "default" {
+		t.Errorf("other-type label = %q, want default", got)
+	}
 }
