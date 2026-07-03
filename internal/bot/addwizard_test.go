@@ -145,6 +145,34 @@ func TestAddLabelKeyboardIsSkippable(t *testing.T) {
 	}
 }
 
+func TestSplitMasks(t *testing.T) {
+	cases := map[string][]string{
+		// the exact multiline paste from the bug report
+		"81.200.148.0/22\n94.228.117.0/24\n188.120.228.0/24": {"81.200.148.0/22", "94.228.117.0/24", "188.120.228.0/24"},
+		"185.12.0.0/16, 95.142.*.*":                          {"185.12.0.0/16", "95.142.*.*"},
+		"185.12.0.0/16 95.142.*.*":                           {"185.12.0.0/16", "95.142.*.*"},
+		"185.12.0.0/16;95.142.*.*":                           {"185.12.0.0/16", "95.142.*.*"},
+		"  185.12.0.0/16  ":                                  {"185.12.0.0/16"},
+		"":                                                   {},
+	}
+	for in, want := range cases {
+		got := splitMasks(in)
+		if len(got) != len(want) {
+			t.Errorf("splitMasks(%q) = %v, want %v", in, got, want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("splitMasks(%q)[%d] = %q, want %q", in, i, got[i], want[i])
+			}
+		}
+	}
+	// ranges keep their hyphen (must not be treated as a separator)
+	if got := splitMasks("95.142.0-50.*"); len(got) != 1 || got[0] != "95.142.0-50.*" {
+		t.Errorf("range mask split wrong: %v", got)
+	}
+}
+
 func TestUniqueLabelAvoidsCollisions(t *testing.T) {
 	ctx := context.Background()
 	h := &Handler{store: aclStore(t)}

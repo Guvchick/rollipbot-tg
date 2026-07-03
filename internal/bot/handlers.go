@@ -742,7 +742,9 @@ func (h *Handler) cbProvider(ctx context.Context, b *bot.Bot, u *models.Update) 
 		s.MsgID = msgID
 	})
 	masks := h.providerMasks(acc.Type())
-	text := fmt.Sprintf("2/4 — %s.\nВведи маску текстом (185.12.0.0/16 или 95.142.*.*)\nили выбери пресет:", accountDisplay(acc))
+	text := fmt.Sprintf("2/4 — %s.\nВведи маску текстом (185.12.0.0/16 или 95.142.*.*).\n"+
+		"Можно сразу несколько — по одной на строку или через запятую, поймаю попадание в любую.\n"+
+		"Или выбери пресет:", accountDisplay(acc))
 	h.edit(ctx, b, chatID, msgID, text, maskKeyboard(masks))
 }
 
@@ -834,20 +836,37 @@ func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 
 // --- shared step logic ---
 
-func (h *Handler) acceptMask(ctx context.Context, b *bot.Bot, chatID int64, msgID int, mask string) {
-	if _, err := engine.ParseMask(mask); err != nil {
-		h.send(ctx, b, chatID, "Некорректная маска: "+err.Error()+"\nПопробуй ещё раз.")
+func (h *Handler) acceptMask(ctx context.Context, b *bot.Bot, chatID int64, msgID int, raw string) {
+	masks := splitMasks(raw)
+	if len(masks) == 0 {
+		h.send(ctx, b, chatID, "Не вижу ни одной маски. Введи хотя бы одну.")
+		return
+	}
+	if _, err := engine.ParseMasks(masks); err != nil {
+		h.send(ctx, b, chatID, "Некорректная маска: "+err.Error()+"\nПопробуй ещё раз (по одной на строку, или через запятую/пробел).")
 		return
 	}
 	st := h.fsm.Update(chatID, func(s *dialogState) {
 		s.Step = stepBudget
-		s.Mask = mask
+		s.Mask = strings.Join(masks, ", ")
 	})
 	hint := ""
 	if acc, ok := h.reg.Get(st.Provider); ok && acc.Caps().MaxRollsPerRun > 0 {
 		hint = fmt.Sprintf(" (макс. за запуск: %d)", acc.Caps().MaxRollsPerRun)
 	}
-	h.edit(ctx, b, chatID, msgID, "3/4 — сколько попыток?"+hint, budgetKeyboard())
+	extra := ""
+	if len(masks) > 1 {
+		extra = fmt.Sprintf(" Ловлю попадание в любую из %d масок.", len(masks))
+	}
+	h.edit(ctx, b, chatID, msgID, "3/4 — сколько попыток?"+hint+extra, budgetKeyboard())
+}
+
+// splitMasks breaks a free-text reply into individual masks. Users paste them
+// one per line, comma-, semicolon- or space-separated — all are accepted.
+func splitMasks(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == '\t' || r == ' ' || r == ',' || r == ';'
+	})
 }
 
 func (h *Handler) acceptBudget(ctx context.Context, b *bot.Bot, chatID int64, msgID int, raw string) {
@@ -912,7 +931,7 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 		return
 	}
 	display := accountDisplay(acc)
-	matcher, err := engine.ParseMask(mask)
+	matcher, err := engine.ParseMasks(splitMasks(mask))
 	if err != nil {
 		h.edit(ctx, b, chatID, msgID, "Некорректная маска: "+err.Error(), nil)
 		h.fsm.Clear(chatID)
