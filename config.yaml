@@ -106,9 +106,9 @@ providers:
 
   mws:
     enabled: false
-    # api_key (v1.…) сервисного аккаунта — бот сам обменяет на IAM-токен и обновит.
-    # VPC API: https://vpc.mwsapis.ru, обмен ключа: https://iam.mwsapis.ru (дефолты).
-    api_key: ${MWS_API_KEY}
+    # token — IAM-токен: `mws iam create-token` (НЕ статический v1.… API-ключ!).
+    # Короткоживущий: при 401 перевыпусти и перезапиши token. VPC: https://vpc.mwsapis.ru.
+    token: ${MWS_TOKEN}
     project_id: ${MWS_PROJECT_ID}
     strategy: floating
     max_rolls_per_run: 10

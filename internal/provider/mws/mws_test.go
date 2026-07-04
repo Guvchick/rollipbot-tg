@@ -2,7 +2,6 @@ package mws
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,53 +102,9 @@ func TestDefaultBaseURL(t *testing.T) {
 	}
 }
 
-// With an api_key (and no direct token), the adapter exchanges it for an IAM
-// token at the IAM endpoint and uses that as the Bearer for the VPC call.
-func TestAPIKeyExchangedForIAMToken(t *testing.T) {
-	const vpcPrefix = "/vpc/v1/projects/p/externalAddresses/"
-	var (
-		exchanged bool
-		sentKey   string
-		vpcAuth   string
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/iam/v2/tokens/:issueServiceAccountToken":
-			exchanged = true
-			body, _ := io.ReadAll(r.Body)
-			if strings.Contains(string(body), "v1.SECRETKEY") {
-				sentKey = "v1.SECRETKEY"
-			}
-			_, _ = w.Write([]byte(`{"token":"eyJ.iam.tok"}`))
-		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, vpcPrefix):
-			vpcAuth = r.Header.Get("Authorization")
-			name := strings.TrimPrefix(r.URL.Path, vpcPrefix)
-			_, _ = w.Write([]byte(`{"metadata":{"name":"` + name + `"},"status":{"ipAddress":"89.108.9.9"}}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	p := New(Config{APIURL: srv.URL, IAMURL: srv.URL, APIKey: "v1.SECRETKEY", ProjectID: "p"}, provider.RollCaps{})
-	ip, err := p.Allocate(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ip.Addr.String() != "89.108.9.9" {
-		t.Fatalf("ip = %v", ip.Addr)
-	}
-	if !exchanged || sentKey != "v1.SECRETKEY" {
-		t.Errorf("api key not exchanged (exchanged=%v key=%q)", exchanged, sentKey)
-	}
-	if vpcAuth != "Bearer eyJ.iam.tok" {
-		t.Errorf("vpc auth = %q, want the exchanged IAM token", vpcAuth)
-	}
-}
-
-func TestNoCredentialsError(t *testing.T) {
-	p := New(Config{ProjectID: "p"}, provider.RollCaps{}) // neither api_key nor token
+func TestNoTokenError(t *testing.T) {
+	p := New(Config{ProjectID: "p"}, provider.RollCaps{}) // no IAM token
 	if _, err := p.Allocate(context.Background()); err == nil {
-		t.Fatal("expected an error when no api_key/token is set")
+		t.Fatal("expected an error when no token is set")
 	}
 }

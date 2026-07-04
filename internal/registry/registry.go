@@ -203,8 +203,6 @@ func buildAdapter(typ string, creds map[string]string, b *config.ProviderConfig,
 	case "mws":
 		return mws.New(mws.Config{
 			APIURL:       get("api_url", b.APIURL),
-			IAMURL:       creds["iam_url"],
-			APIKey:       creds["api_key"],
 			Token:        creds["token"],
 			ProjectID:    creds["project_id"],
 			Region:       get("region", b.Region),

@@ -46,10 +46,9 @@ func Fields(typ string) []Field {
 			{"api_url", false, false},
 		}
 	case "mws":
-		// Provide api_key (recommended) OR a ready token; validated at runtime.
 		return []Field{
-			{"api_key", false, true}, {"token", false, true}, {"project_id", true, false},
-			{"api_url", false, false}, {"iam_url", false, false}, {"region", false, false},
+			{"token", true, true}, {"project_id", true, false},
+			{"api_url", false, false}, {"region", false, false},
 			{"network_id", false, false}, {"subnetwork_id", false, false},
 		}
 	case "ruvds":
@@ -130,13 +129,11 @@ func credsFromBlock(typ string, b *config.ProviderConfig) map[string]string {
 		}
 		put("api_url", b.APIURL)
 	case "mws":
-		put("api_key", b.APIKey)
 		put("token", b.Token)
 		put("project_id", b.ProjectID)
 		put("network_id", b.NetworkID)
 		put("subnetwork_id", b.SubnetworkID)
 		put("api_url", b.APIURL)
-		put("iam_url", b.IAMURL)
 	case "ruvds":
 		put("token", b.Token)
 		put("server_id", b.ServerID)

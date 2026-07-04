@@ -91,8 +91,6 @@ type ProviderConfig struct {
 	// MWS
 	NetworkID    string `yaml:"network_id"`
 	SubnetworkID string `yaml:"subnetwork_id"`
-	APIKey       string `yaml:"api_key"` // MWS service-account API key (v1.…)
-	IAMURL       string `yaml:"iam_url"` // MWS IAM base (token exchange)
 
 	// Gcore
 	APIURL   string `yaml:"api_url"`

@@ -72,14 +72,13 @@ var providerGuides = map[string]providerGuide{
 	"mws": {
 		title: "MWS Cloud Platform (MTS Web Services)",
 		steps: []string{
-			"Создай сервисный аккаунт (IAM) → вкладка «Ключи доступа» → «Создать» → тип «API-ключ».",
-			"Скопируй значение API-ключа (начинается с v1.…) в поле api_key. ⚠️ показывается один раз.",
-			"Бот сам обменяет api_key на короткоживущий IAM-токен и будет обновлять его — вручную ничего делать не надо.",
-			"project_id — ID проекта (…/projects/<project_id>/…).",
-			"Публичный IP роллится ресурсом externalAddresses (https://vpc.mwsapis.ru, обмен — https://iam.mwsapis.ru) — дефолты, ничего не указывать.",
-			"Альтернатива: если хочешь, можешь вместо api_key дать готовый IAM-токен в поле token (mws iam create-token), но он короткоживущий.",
+			"⚠️ Статический API-ключ (v1.…) для VPC НЕ подходит — он только для Artifact Registry/GPT. Нужен IAM-токен.",
+			"Поставь MWS CLI, настрой профиль сервисного аккаунта и выполни: `mws iam create-token`.",
+			"Скопируй выведенный IAM-токен (формат eyJ….eyJ….подпись) в поле token — только значение, без «Bearer».",
+			"⚠️ IAM-токен короткоживущий: при 401 просто перевыпусти его и перезапиши поле token.",
+			"project_id — ID проекта (…/projects/<project_id>/…). Публичный IP роллится на https://vpc.mwsapis.ru (дефолт).",
 		},
-		example: `/addaccount mws prod {"api_key":"v1.…","project_id":"P"}`,
+		example: `/addaccount mws prod {"token":"eyJ….eyJ….sig","project_id":"P"}`,
 	},
 	"ruvds": {
 		title: "RuVDS",
@@ -140,11 +139,9 @@ var fieldHints = map[string]map[string]string{
 		"api_url":    "Обычно дефолтный. Необязательно — можно пропустить.",
 	},
 	"mws": {
-		"api_key":       "API-ключ сервисного аккаунта (v1.…): IAM → сервисный аккаунт → «Ключи доступа» → API-ключ. Бот сам обменяет на IAM-токен.",
-		"token":         "Альтернатива api_key: готовый IAM-токен (mws iam create-token). Короткоживущий — лучше api_key.",
+		"token":         "IAM-токен (eyJ….eyJ….подпись): `mws iam create-token` в MWS CLI. НЕ API-ключ v1.… (тот для VPC не годится). Короткоживущий.",
 		"project_id":    "ID проекта: из адреса …/projects/<id>/… или свойств проекта.",
 		"api_url":       "База VPC API. По умолчанию https://vpc.mwsapis.ru — пропусти.",
-		"iam_url":       "База IAM (обмен ключа на токен). По умолчанию https://iam.mwsapis.ru — пропусти.",
 		"region":        "Регион, если требуется. Необязательно.",
 		"network_id":    "Обычно НЕ нужен для внешнего адреса. Необязательно.",
 		"subnetwork_id": "Обычно НЕ нужен для внешнего адреса. Необязательно.",
