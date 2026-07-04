@@ -132,4 +132,10 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-var _ provider.Provider = (*Provider)(nil)
+// SetHTTPClient routes REST calls through c (e.g. a proxy client).
+func (p *Provider) SetHTTPClient(c *http.Client) { p.client = c }
+
+var (
+	_ provider.Provider         = (*Provider)(nil)
+	_ provider.HTTPConfigurable = (*Provider)(nil)
+)

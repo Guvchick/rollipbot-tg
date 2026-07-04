@@ -54,6 +54,20 @@ CREATE TABLE IF NOT EXISTS allowed_users (
 CREATE TABLE IF NOT EXISTS forum_topics (
     name      TEXT PRIMARY KEY,
     thread_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proxies (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    label      TEXT NOT NULL,
+    scheme     TEXT NOT NULL,
+    host       TEXT NOT NULL,
+    port       INTEGER NOT NULL,
+    username   TEXT,
+    password   TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS account_proxy (
+    account_id INTEGER PRIMARY KEY,
+    proxy_id   INTEGER NOT NULL
 );`
 
 // SQLite is a modernc.org/sqlite-backed Storage.
@@ -319,6 +333,116 @@ func (s *SQLite) SetForumTopic(ctx context.Context, name string, threadID int) e
 		 ON CONFLICT(name) DO UPDATE SET thread_id = excluded.thread_id`,
 		name, threadID)
 	return err
+}
+
+// --- proxies ---
+
+const proxyCols = `id, label, scheme, host, port, COALESCE(username,''), COALESCE(password,'')`
+
+func scanProxy(scan func(...any) error) (Proxy, error) {
+	var p Proxy
+	err := scan(&p.ID, &p.Label, &p.Scheme, &p.Host, &p.Port, &p.Username, &p.Password)
+	return p, err
+}
+
+func (s *SQLite) ListProxies(ctx context.Context) ([]Proxy, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+proxyCols+` FROM proxies ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Proxy
+	for rows.Next() {
+		p, err := scanProxy(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) GetProxy(ctx context.Context, id int64) (Proxy, error) {
+	p, err := scanProxy(s.db.QueryRowContext(ctx, `SELECT `+proxyCols+` FROM proxies WHERE id = ?`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Proxy{}, ErrNotFound
+	}
+	return p, err
+}
+
+func (s *SQLite) AddProxy(ctx context.Context, p Proxy) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxies (label, scheme, host, port, username, password) VALUES (?, ?, ?, ?, ?, ?)`,
+		p.Label, p.Scheme, p.Host, p.Port, nullStr(p.Username), nullStr(p.Password))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *SQLite) DeleteProxy(ctx context.Context, id int64) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM account_proxy WHERE proxy_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM proxies WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) BindProxy(ctx context.Context, accountID, proxyID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO account_proxy (account_id, proxy_id) VALUES (?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET proxy_id = excluded.proxy_id`,
+		accountID, proxyID)
+	return err
+}
+
+func (s *SQLite) UnbindProxy(ctx context.Context, accountID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM account_proxy WHERE account_id = ?`, accountID)
+	return err
+}
+
+func (s *SQLite) AccountProxy(ctx context.Context, accountID int64) (Proxy, bool, error) {
+	p, err := scanProxy(s.db.QueryRowContext(ctx,
+		`SELECT `+proxyCols+` FROM proxies WHERE id = (SELECT proxy_id FROM account_proxy WHERE account_id = ?)`,
+		accountID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Proxy{}, false, nil
+	}
+	if err != nil {
+		return Proxy{}, false, err
+	}
+	return p, true, nil
+}
+
+// --- stats ---
+
+func (s *SQLite) RollStats(ctx context.Context) ([]ProviderStat, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT provider,
+		        COUNT(*),
+		        SUM(CASE WHEN matched THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN released THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN date(created_at) = date('now') THEN 1 ELSE 0 END)
+		 FROM roll_log GROUP BY provider ORDER BY provider`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProviderStat
+	for rows.Next() {
+		var st ProviderStat
+		if err := rows.Scan(&st.Provider, &st.Total, &st.Matched, &st.Released, &st.Today); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
 }
 
 // compile-time check

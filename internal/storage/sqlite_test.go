@@ -17,6 +17,70 @@ func newStore(t *testing.T) *SQLite {
 	return st
 }
 
+func TestProxiesCRUDAndBinding(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+
+	id, err := st.AddProxy(ctx, Proxy{Label: "p1", Scheme: "socks5", Host: "1.2.3.4", Port: 1080, Username: "u", Password: "pw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.ListProxies(ctx)
+	if err != nil || len(list) != 1 || list[0].Host != "1.2.3.4" || list[0].Username != "u" {
+		t.Fatalf("list proxies = %v, %v", list, err)
+	}
+	if url := list[0].URL(); url != "socks5://u:pw@1.2.3.4:1080" {
+		t.Errorf("proxy URL = %q", url)
+	}
+
+	// bind to an account, read it back
+	accID, err := st.UpsertAccount(ctx, Account{Provider: "timeweb", Label: "a", Enabled: true, Credentials: map[string]string{"token": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.AccountProxy(ctx, accID); ok {
+		t.Fatal("no proxy should be bound yet")
+	}
+	if err := st.BindProxy(ctx, accID, id); err != nil {
+		t.Fatal(err)
+	}
+	px, ok, err := st.AccountProxy(ctx, accID)
+	if err != nil || !ok || px.ID != id {
+		t.Fatalf("bound proxy = %+v ok=%v err=%v", px, ok, err)
+	}
+	// deleting the proxy also clears the binding
+	if err := st.DeleteProxy(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.AccountProxy(ctx, accID); ok {
+		t.Error("binding should be gone after proxy delete")
+	}
+}
+
+func TestRollStats(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	// two matched (one of them released=false), one released miss
+	_ = st.LogRoll(ctx, RollLogEntry{Provider: "timeweb#1", IP: "1.1.1.1", Matched: true, Released: false})
+	_ = st.LogRoll(ctx, RollLogEntry{Provider: "timeweb#1", IP: "1.1.1.2", Matched: false, Released: true})
+	_ = st.LogRoll(ctx, RollLogEntry{Provider: "vkcloud#2", IP: "2.2.2.2", Matched: true, Released: false})
+
+	stats, err := st.RollStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]ProviderStat{}
+	for _, s := range stats {
+		by[s.Provider] = s
+	}
+	if s := by["timeweb#1"]; s.Total != 2 || s.Matched != 1 || s.Released != 1 || s.Today != 2 {
+		t.Errorf("timeweb stat = %+v", s)
+	}
+	if s := by["vkcloud#2"]; s.Total != 1 || s.Matched != 1 {
+		t.Errorf("vkcloud stat = %+v", s)
+	}
+}
+
 func TestAccountsCRUD(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)

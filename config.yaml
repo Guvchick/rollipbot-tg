@@ -93,9 +93,10 @@ providers:
     network_id: ${MWS_NETWORK_ID}
     subnetwork_id: ${MWS_SUBNET_ID}
     strategy: floating
-    max_rolls_per_run: 30
-    daily_cap: 0
+    max_rolls_per_run: 10
+    daily_cap: 10               # ≤10 новых IP/сутки (мягкий предохранитель)
     rate_limit_rps: 5
+    roll_delay_ms: 1500         # пауза между роллами (мс)
     masks: ["89.108.0.0/16"]
 
   # --- IP привязан к серверу: роллинг пересозданием / заказом доп. IP ---

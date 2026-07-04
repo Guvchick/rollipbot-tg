@@ -7,6 +7,7 @@ import (
 
 	"ip-roller-bot/internal/provider"
 	"ip-roller-bot/internal/registry"
+	"ip-roller-bot/internal/storage"
 )
 
 // typeNames maps provider type to a pretty label.
@@ -42,14 +43,22 @@ func mainMenu() *models.InlineKeyboardMarkup {
 		{{Text: "🎲 Ролл", CallbackData: "menu:roll"}},
 		{
 			{Text: "📦 Пул", CallbackData: "menu:pool"},
-			{Text: "📊 Лимиты", CallbackData: "menu:limits"},
+			{Text: "📈 Статистика", CallbackData: "menu:stats"},
 		},
-		{{Text: "🔐 Аккаунты", CallbackData: "menu:accounts"}},
+		{
+			{Text: "🔐 Аккаунты", CallbackData: "menu:accounts"},
+			{Text: "🌐 Прокси", CallbackData: "menu:proxies"},
+		},
 	}}
 }
 
 func backToMenuRow() []models.InlineKeyboardButton {
 	return []models.InlineKeyboardButton{{Text: "⬅️ Меню", CallbackData: "menu:back"}}
+}
+
+// menuBackKeyboard is a single "back to main menu" row for info screens.
+func menuBackKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{backToMenuRow()}}
 }
 
 // accountsMenu lists accounts with per-account toggle/delete and an add button.
@@ -60,32 +69,21 @@ func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
 		if !a.Enabled {
 			flag = "⛔"
 		}
+		px := "🌐"
+		if a.Proxy != "" {
+			px = "🌐✓"
+		}
 		rows = append(rows, []models.InlineKeyboardButton{
 			{Text: fmt.Sprintf("%s %s", flag, a.Display), CallbackData: fmt.Sprintf("acc:toggle:%d", a.ID)},
+			{Text: px, CallbackData: fmt.Sprintf("acc:proxy:%d", a.ID)},
 			{Text: "🗑", CallbackData: fmt.Sprintf("acc:del:%d", a.ID)},
 		})
 	}
 	rows = append(rows,
 		[]models.InlineKeyboardButton{{Text: "➕ Добавить аккаунт", CallbackData: "acc:add"}},
-		[]models.InlineKeyboardButton{{Text: "🧹 Очистить неиспользуемые IP", CallbackData: "acc:cleanup"}},
 		backToMenuRow(),
 	)
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
-}
-
-// accountsBackKeyboard is a single "back to accounts" row.
-func accountsBackKeyboard() *models.InlineKeyboardMarkup {
-	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}},
-	}}
-}
-
-// cleanupConfirmKeyboard gates the destructive delete behind an explicit tap.
-func cleanupConfirmKeyboard(n int) *models.InlineKeyboardMarkup {
-	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{{Text: fmt.Sprintf("🗑 Удалить %d", n), CallbackData: "acc:cleanupgo"}},
-		{{Text: "⬅️ Отмена", CallbackData: "acc:list"}},
-	}}
 }
 
 // addTypeKeyboard lists provider types for the first step of the add wizard.
@@ -139,6 +137,65 @@ type accountRow struct {
 	ID      int64
 	Display string
 	Enabled bool
+	Proxy   string // bound proxy label, empty if none
+}
+
+// proxiesMenu lists proxies (delete each) plus add + back.
+func proxiesMenu(proxies []storage.Proxy) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	for _, p := range proxies {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: fmt.Sprintf("🌐 %s · %s (%s:%d)", p.Scheme, p.Label, p.Host, p.Port), CallbackData: "px:list"},
+			{Text: "🗑", CallbackData: fmt.Sprintf("px:del:%d", p.ID)},
+		})
+	}
+	rows = append(rows,
+		[]models.InlineKeyboardButton{{Text: "➕ Добавить прокси", CallbackData: "px:add"}},
+		backToMenuRow(),
+	)
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// proxyLineKeyboard is the cancel row shown while waiting for the proxy line.
+func proxyLineKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "✖️ Отмена", CallbackData: "px:list"}},
+	}}
+}
+
+// proxySchemeKeyboard picks the proxy scheme at the start of the add wizard.
+func proxySchemeKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{
+			{Text: "SOCKS5", CallbackData: "pxscheme:socks5"},
+			{Text: "HTTP", CallbackData: "pxscheme:http"},
+		},
+		{{Text: "⬅️ Назад", CallbackData: "px:list"}},
+	}}
+}
+
+// accountProxyPicker lets an account pick one of the proxies (or none).
+func accountProxyPicker(accountID int64, proxies []storage.Proxy, currentID int64) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	for _, p := range proxies {
+		mark := ""
+		if p.ID == currentID {
+			mark = "✓ "
+		}
+		rows = append(rows, []models.InlineKeyboardButton{{
+			Text:         fmt.Sprintf("%s🌐 %s · %s", mark, p.Scheme, p.Label),
+			CallbackData: fmt.Sprintf("accpx:%d:%d", accountID, p.ID),
+		}})
+	}
+	none := "❌ Без прокси"
+	if currentID == 0 {
+		none = "✓ ❌ Без прокси"
+	}
+	rows = append(rows,
+		[]models.InlineKeyboardButton{{Text: none, CallbackData: fmt.Sprintf("accpx:%d:0", accountID)}},
+		[]models.InlineKeyboardButton{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}},
+	)
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // providerKeyboard lists enabled accounts, one per row (labels can be long).
@@ -192,5 +249,6 @@ func resultKeyboard(poolID int64) *models.InlineKeyboardMarkup {
 			{Text: "🔗 Привязать к ВМ", CallbackData: fmt.Sprintf("attach:%d", poolID)},
 			{Text: "✅ Оставить в пуле", CallbackData: "pool"},
 		},
+		backToMenuRow(),
 	}}
 }

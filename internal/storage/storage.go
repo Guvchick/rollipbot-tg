@@ -3,6 +3,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -44,6 +45,39 @@ type AllowedUser struct {
 	AddedAt time.Time
 }
 
+// Proxy is an outbound proxy the bot can route provider API calls through.
+type Proxy struct {
+	ID       int64
+	Label    string
+	Scheme   string // socks5 | http
+	Host     string
+	Port     int
+	Username string
+	Password string
+}
+
+// URL renders the proxy as a connection string (scheme://[user:pass@]host:port).
+func (p Proxy) URL() string {
+	auth := ""
+	if p.Username != "" {
+		auth = p.Username
+		if p.Password != "" {
+			auth += ":" + p.Password
+		}
+		auth += "@"
+	}
+	return fmt.Sprintf("%s://%s%s:%d", p.Scheme, auth, p.Host, p.Port)
+}
+
+// ProviderStat aggregates roll history for one account (provider key).
+type ProviderStat struct {
+	Provider string
+	Total    int // rolls attempted (allocations)
+	Matched  int // addresses that matched a mask
+	Released int // addresses freed for not matching
+	Today    int // rolls today
+}
+
 // Storage is the persistence contract.
 type Storage interface {
 	AddPoolIP(ctx context.Context, ip PoolIP) (int64, error)
@@ -70,6 +104,18 @@ type Storage interface {
 	ListAllowedUsers(ctx context.Context) ([]AllowedUser, error)
 	AddAllowedUser(ctx context.Context, u AllowedUser) error
 	RemoveAllowedUser(ctx context.Context, userID int64) error
+
+	// Proxies and per-account bindings
+	ListProxies(ctx context.Context) ([]Proxy, error)
+	GetProxy(ctx context.Context, id int64) (Proxy, error)
+	AddProxy(ctx context.Context, p Proxy) (int64, error)
+	DeleteProxy(ctx context.Context, id int64) error
+	BindProxy(ctx context.Context, accountID, proxyID int64) error
+	UnbindProxy(ctx context.Context, accountID int64) error
+	AccountProxy(ctx context.Context, accountID int64) (Proxy, bool, error)
+
+	// Roll statistics (aggregated per provider key)
+	RollStats(ctx context.Context) ([]ProviderStat, error)
 
 	// Forum topic id cache (name → message_thread_id) for notifications
 	GetForumTopic(ctx context.Context, name string) (threadID int, ok bool, err error)

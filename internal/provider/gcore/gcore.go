@@ -121,4 +121,10 @@ func (p *Provider) Attach(ctx context.Context, ip provider.AllocatedIP, portID s
 	return provider.DoJSON(p.client, req, p.Name(), nil)
 }
 
-var _ provider.Provider = (*Provider)(nil)
+// SetHTTPClient routes REST calls through c (e.g. a proxy client).
+func (p *Provider) SetHTTPClient(c *http.Client) { p.client = c }
+
+var (
+	_ provider.Provider         = (*Provider)(nil)
+	_ provider.HTTPConfigurable = (*Provider)(nil)
+)

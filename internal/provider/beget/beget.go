@@ -64,4 +64,10 @@ func (p *Provider) Attach(ctx context.Context, ip provider.AllocatedIP, vmID str
 	return &provider.NotImplementedError{Provider: p.Name(), Detail: "IP закрепляется за VPS при заказе/создании"}
 }
 
-var _ provider.Provider = (*Provider)(nil)
+// SetHTTPClient routes REST calls through c (e.g. a proxy client).
+func (p *Provider) SetHTTPClient(c *http.Client) { p.client = c }
+
+var (
+	_ provider.Provider         = (*Provider)(nil)
+	_ provider.HTTPConfigurable = (*Provider)(nil)
+)

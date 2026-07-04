@@ -92,6 +92,10 @@ func Run(
 		// add-account wizard callbacks
 		bot.WithCallbackQueryDataHandler("addtype:", bot.MatchTypePrefix, h.cbAddType),
 		bot.WithCallbackQueryDataHandler("addskip", bot.MatchTypeExact, h.cbAddSkip),
+		// proxy callbacks
+		bot.WithCallbackQueryDataHandler("px:", bot.MatchTypePrefix, h.cbProxy),
+		bot.WithCallbackQueryDataHandler("pxscheme:", bot.MatchTypePrefix, h.cbProxyScheme),
+		bot.WithCallbackQueryDataHandler("accpx:", bot.MatchTypePrefix, h.cbAccountProxyBind),
 		// roll wizard callbacks
 		bot.WithCallbackQueryDataHandler("prov:", bot.MatchTypePrefix, h.cbProvider),
 		bot.WithCallbackQueryDataHandler("mask:", bot.MatchTypePrefix, h.cbMask),
@@ -125,13 +129,14 @@ func Run(
 func (h *Handler) authMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if !h.acl.IsAllowed(userID(update)) {
+			// Silently ignore unauthorized users (no reply). Callback queries are
+			// acked quietly so the client stops its loading spinner.
 			if update.CallbackQuery != nil {
 				_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-					CallbackQueryID: update.CallbackQuery.ID, Text: "⛔ Нет доступа", ShowAlert: true,
+					CallbackQueryID: update.CallbackQuery.ID,
 				})
-			} else if update.Message != nil {
-				h.send(ctx, b, update.Message.Chat.ID, "⛔ Нет доступа. Обратись к администратору бота.")
 			}
+			h.log.Info("отклонён неавторизованный пользователь", "user", userID(update))
 			return
 		}
 		next(ctx, b, update)
@@ -294,52 +299,59 @@ func (h *Handler) pinMenu(ctx context.Context, b *bot.Bot, chatID int64, msgID i
 }
 
 func (h *Handler) cmdRoll(ctx context.Context, b *bot.Bot, u *models.Update) {
-	h.sendRollStart(ctx, b, u.Message.Chat.ID)
+	h.sendRollStart(ctx, b, u.Message.Chat.ID, 0)
 }
 
-// sendRollStart kicks off the /roll wizard (used by command and menu button).
-func (h *Handler) sendRollStart(ctx context.Context, b *bot.Bot, chatID int64) {
+// sendRollStart kicks off the /roll wizard. When msgID != 0 (menu button) it
+// runs inside that message (single live screen); from /roll it opens a new one.
+func (h *Handler) sendRollStart(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
 	accs := h.reg.Accounts()
 	if len(accs) == 0 {
-		h.send(ctx, b, chatID, "Нет включённых аккаунтов. Добавь через меню → 🔐 Аккаунты, или /addaccount.")
+		h.edit(ctx, b, chatID, msgID, "Нет включённых аккаунтов. Добавь через меню → 🔐 Аккаунты.", menuBackKeyboard())
 		return
 	}
-	m, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      chatID,
-		Text:        "1/4 — выбери аккаунт:",
-		ReplyMarkup: providerKeyboard(accs),
-	})
-	if err != nil {
-		h.log.Warn("sendRollStart failed", "err", err)
-		return
+	if msgID == 0 {
+		m, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID, Text: "1/4 — выбери аккаунт:", ReplyMarkup: providerKeyboard(accs),
+		})
+		if err != nil {
+			h.log.Warn("sendRollStart failed", "err", err)
+			return
+		}
+		msgID = m.ID
+	} else {
+		h.edit(ctx, b, chatID, msgID, "1/4 — выбери аккаунт:", providerKeyboard(accs))
 	}
-	h.fsm.Update(chatID, func(s *dialogState) { *s = dialogState{Step: stepProvider, MsgID: m.ID} })
+	h.fsm.Update(chatID, func(s *dialogState) { *s = dialogState{Step: stepProvider, MsgID: msgID} })
 }
 
 func (h *Handler) cmdPool(ctx context.Context, b *bot.Bot, u *models.Update) {
-	h.showPool(ctx, b, u.Message.Chat.ID)
+	h.showPool(ctx, b, u.Message.Chat.ID, 0)
 }
 
-func (h *Handler) showPool(ctx context.Context, b *bot.Bot, chatID int64) {
+// showPool lists reserved addresses. Pool rows are persisted at match time and
+// are independent of any in-progress roll, so a caught IP shows here even while
+// another roll is running or the result screen is still "pending".
+func (h *Handler) showPool(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
 	ips, err := h.store.ListPoolIPs(ctx)
 	if err != nil {
-		h.send(ctx, b, chatID, "Ошибка чтения пула: "+err.Error())
+		h.edit(ctx, b, chatID, msgID, "Ошибка чтения пула: "+err.Error(), menuBackKeyboard())
 		return
 	}
 	if len(ips) == 0 {
-		h.send(ctx, b, chatID, "Пул пуст. Сначала запусти ролл.")
+		h.edit(ctx, b, chatID, msgID, "📦 Пул пуст. Запусти 🎲 Ролл — пойманные адреса появятся здесь.", menuBackKeyboard())
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("📦 Зарезервированные адреса:\n")
+	fmt.Fprintf(&sb, "📦 Зарезервированные адреса (%d):\n", len(ips))
 	for _, p := range ips {
-		state := "свободен"
+		state := "🟢 свободен (в ожидании привязки)"
 		if p.AttachedVM != "" {
-			state = "привязан к " + p.AttachedVM
+			state = "🔗 привязан к " + p.AttachedVM
 		}
-		fmt.Fprintf(&sb, "• %s — %s [%s] (%s)\n", p.IP, h.displayKey(p.Provider), state, p.MatchedMask)
+		fmt.Fprintf(&sb, "• %s — %s\n   %s · маска %s\n", p.IP, h.displayKey(p.Provider), state, p.MatchedMask)
 	}
-	h.send(ctx, b, chatID, sb.String())
+	h.edit(ctx, b, chatID, msgID, sb.String(), menuBackKeyboard())
 }
 
 func (h *Handler) cmdLimits(ctx context.Context, b *bot.Bot, u *models.Update) {
@@ -366,8 +378,17 @@ func (h *Handler) showLimits(ctx context.Context, b *bot.Bot, chatID int64) {
 }
 
 func (h *Handler) cmdCancel(ctx context.Context, b *bot.Bot, u *models.Update) {
-	h.fsm.Clear(u.Message.Chat.ID)
-	h.send(ctx, b, u.Message.Chat.ID, "Диалог отменён.")
+	chatID := u.Message.Chat.ID
+	h.fsm.Clear(chatID)
+	// Fold back into the pinned menu if we know it, else just reopen the menu.
+	h.menuMu.Lock()
+	msgID := h.menuMsg[chatID]
+	h.menuMu.Unlock()
+	if msgID != 0 {
+		h.editHTML(ctx, b, chatID, msgID, h.menuText(), mainMenu())
+	} else {
+		h.sendMenu(ctx, b, chatID)
+	}
 }
 
 // cmdAttach: /attach <ip> <vm_id>
@@ -407,19 +428,27 @@ func (h *Handler) accountsView(ctx context.Context) (string, *models.InlineKeybo
 		return "Ошибка: " + err.Error(), accountsMenu(nil)
 	}
 	if len(accs) == 0 {
-		return "🔐 Аккаунтов нет.\nНажми «➕ Добавить» для пошагового гайда, затем пришли /addaccount.", accountsMenu(nil)
+		return "🔐 Аккаунтов нет.\nНажми «➕ Добавить аккаунт» — проведу по шагам.", accountsMenu(nil)
 	}
 	rows := make([]accountRow, 0, len(accs))
 	var sb strings.Builder
-	sb.WriteString("🔐 Аккаунты (левая кнопка — вкл/выкл, 🗑 — удалить):\n")
+	sb.WriteString("🔐 Аккаунты (слева — вкл/выкл, 🌐 — прокси, 🗑 — удалить):\n")
 	for _, a := range accs {
 		flag := "✅вкл"
 		if !a.Enabled {
 			flag = "⛔выкл"
 		}
 		disp := typeName(a.Provider) + " · " + a.Label
-		fmt.Fprintf(&sb, "• #%d %s [%s] — %s\n", a.ID, disp, flag, maskCreds(a.Provider, a.Credentials))
-		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled})
+		pxLabel := ""
+		if px, ok, _ := h.store.AccountProxy(ctx, a.ID); ok {
+			pxLabel = px.Scheme + "·" + px.Label
+		}
+		pxNote := ""
+		if pxLabel != "" {
+			pxNote = " 🌐" + pxLabel
+		}
+		fmt.Fprintf(&sb, "• #%d %s [%s] — %s%s\n", a.ID, disp, flag, maskCreds(a.Provider, a.Credentials), pxNote)
+		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled, Proxy: pxLabel})
 	}
 	return sb.String(), accountsMenu(rows)
 }
@@ -654,16 +683,21 @@ func (h *Handler) cbMenu(ctx context.Context, b *bot.Bot, u *models.Update) {
 	chatID, msgID := cbChatMsg(q)
 	switch strings.TrimPrefix(q.Data, "menu:") {
 	case "roll":
-		h.sendRollStart(ctx, b, chatID)
+		h.sendRollStart(ctx, b, chatID, msgID)
 	case "pool":
-		h.showPool(ctx, b, chatID)
-	case "limits":
-		h.showLimits(ctx, b, chatID)
+		h.showPool(ctx, b, chatID, msgID)
+	case "stats":
+		h.showStats(ctx, b, chatID, msgID)
 	case "accounts":
 		if !h.requireAdminCB(ctx, b, q) {
 			return
 		}
 		h.editAccountsMenu(ctx, b, chatID, msgID)
+	case "proxies":
+		if !h.requireAdminCB(ctx, b, q) {
+			return
+		}
+		h.editProxiesMenu(ctx, b, chatID, msgID)
 	case "back":
 		h.fsm.Clear(chatID)
 		h.editHTML(ctx, b, chatID, msgID, h.menuText(), mainMenu())
@@ -687,11 +721,8 @@ func (h *Handler) cbAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.fsm.Clear(chatID)
 		h.editAccountsMenu(ctx, b, chatID, msgID)
 		return
-	case data == "cleanup":
-		h.cbCleanup(ctx, b, chatID, msgID)
-		return
-	case data == "cleanupgo":
-		h.cbCleanupRun(ctx, b, chatID, msgID)
+	case strings.HasPrefix(data, "proxy:"):
+		h.cbAccountProxyPick(ctx, b, chatID, msgID, strings.TrimPrefix(data, "proxy:"))
 		return
 	case data == "addhelp": // legacy: text /addaccount help
 		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
@@ -788,7 +819,8 @@ func (h *Handler) cbCancel(ctx context.Context, b *bot.Bot, u *models.Update) {
 	h.ack(ctx, b, q)
 	chatID, msgID := cbChatMsg(q)
 	h.fsm.Clear(chatID)
-	h.edit(ctx, b, chatID, msgID, "Диалог отменён.", nil)
+	// Single live screen: fold back into the main menu instead of a dead notice.
+	h.editHTML(ctx, b, chatID, msgID, h.menuText(), mainMenu())
 }
 
 func (h *Handler) cbKeepInPool(ctx context.Context, b *bot.Bot, u *models.Update) {
@@ -796,7 +828,7 @@ func (h *Handler) cbKeepInPool(ctx context.Context, b *bot.Bot, u *models.Update
 	h.ack(ctx, b, q)
 	chatID, msgID := cbChatMsg(q)
 	st := h.fsm.Get(chatID)
-	h.edit(ctx, b, chatID, msgID, fmt.Sprintf("✅ Адрес %s оставлен в пуле. /pool — список.", st.ResultIP), nil)
+	h.edit(ctx, b, chatID, msgID, fmt.Sprintf("✅ Адрес %s оставлен в пуле.", st.ResultIP), menuBackKeyboard())
 	h.fsm.Clear(chatID)
 }
 
@@ -835,6 +867,8 @@ func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.acceptAddLabel(ctx, b, chatID, st.MsgID, text)
 	case stepAddField:
 		h.acceptAddField(ctx, b, chatID, u.Message.ID, text)
+	case stepProxyLine:
+		h.acceptProxyLine(ctx, b, chatID, u.Message.ID, text)
 	default:
 		h.send(ctx, b, chatID, "Открой меню кнопкой ниже или пришли /start.")
 	}
@@ -944,6 +978,12 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 		return
 	}
 
+	// Auto-clean any leaked, unbound (non-pool) IPs before rolling so quota is
+	// not wasted on orphans from an interrupted run.
+	if n := h.autoCleanupAccount(ctx, b, acc); n > 0 {
+		h.edit(ctx, b, chatID, msgID, fmt.Sprintf("🧹 Подчистил %d повисших IP. Начинаю ролл…", n), nil)
+	}
+
 	var lastEdit time.Time
 	var rolled []string // every address seen this run, for the forum topic
 	onAttempt := func(n int, ip string, matched bool) {
@@ -968,18 +1008,22 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 
 	res, err := h.engine.Roll(ctx, acc, matcher, budget, onAttempt)
 	if err != nil {
-		h.edit(ctx, b, chatID, msgID, h.rollErrText(display, err), nil)
+		h.edit(ctx, b, chatID, msgID, h.rollErrText(display, err), menuBackKeyboard())
 		h.fsm.Clear(chatID)
-		// log to the forum group
+		// Surface to docker logs and the forum group.
 		var q *provider.QuotaError
 		switch {
 		case errors.As(err, &q):
+			h.log.Warn("ролл: квота исчерпана", "account", display, "until", q.AvailableAt)
 			h.notifier.QuotaExceeded(ctx, b, display, q.AvailableAt, rolled)
 		case errors.Is(err, engine.ErrBudgetExhausted):
+			h.log.Info("ролл: без совпадений", "account", display, "mask", mask, "budget", budget)
 			h.notifier.NoMatch(ctx, b, display, mask, budget, rolled)
 		default:
+			h.log.Error("ролл: ошибка", "account", display, "err", err)
 			h.notifier.Failed(ctx, b, display, err.Error(), rolled)
 		}
+		h.postLimits(ctx, b, acc)
 		return
 	}
 
@@ -999,9 +1043,11 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 		s.ResultResID = res.IP.ID
 		s.ResultPoolID = id
 	})
+	h.log.Info("ролл: поймал IP", "account", display, "ip", res.IP.Addr.String(), "attempts", res.Attempts)
 	h.edit(ctx, b, chatID, msgID, fmt.Sprintf("✅ Готово!\nАккаунт: %s\nАдрес: %s\nСовпал за %d попыт.\nID ресурса: %s",
 		display, res.IP.Addr.String(), res.Attempts, res.IP.ID), resultKeyboard(id))
 	h.notifier.Caught(ctx, b, display, res.IP.Addr.String(), mask, res.Attempts, rolled)
+	h.postLimits(ctx, b, acc)
 }
 
 func (h *Handler) doAttach(ctx context.Context, b *bot.Bot, chatID int64, pool storage.PoolIP, vmID string) {

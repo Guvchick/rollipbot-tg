@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"time"
 )
@@ -42,6 +43,13 @@ type Provider interface {
 type UnusedIP struct {
 	Addr netip.Addr
 	ID   string
+}
+
+// HTTPConfigurable is an optional capability: adapters whose REST calls can be
+// routed through a custom http.Client (e.g. via a proxy) implement it. The
+// registry sets the client per account when a proxy is bound.
+type HTTPConfigurable interface {
+	SetHTTPClient(*http.Client)
 }
 
 // Cleaner is an optional capability. Providers that can enumerate their own

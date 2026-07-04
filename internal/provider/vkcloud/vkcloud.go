@@ -5,6 +5,7 @@ package vkcloud
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"sync"
 
@@ -29,8 +30,17 @@ type Provider struct {
 	extNetID string
 	caps     provider.RollCaps
 
-	mu  sync.Mutex
-	net *gophercloud.ServiceClient
+	mu         sync.Mutex
+	net        *gophercloud.ServiceClient
+	httpClient *http.Client
+}
+
+// SetHTTPClient routes the OpenStack calls through c (e.g. a proxy client).
+func (p *Provider) SetHTTPClient(c *http.Client) {
+	p.mu.Lock()
+	p.httpClient = c
+	p.net = nil // force re-auth with the new transport
+	p.mu.Unlock()
 }
 
 func New(cfg Config, caps provider.RollCaps) *Provider {
@@ -53,9 +63,23 @@ func (p *Provider) client(ctx context.Context) (*gophercloud.ServiceClient, erro
 	if p.net != nil {
 		return p.net, nil
 	}
-	pc, err := openstack.AuthenticatedClient(ctx, p.ao)
-	if err != nil {
-		return nil, fmt.Errorf("vkcloud: auth: %w", err)
+	var pc *gophercloud.ProviderClient
+	var err error
+	if p.httpClient != nil {
+		// Route auth + API through the proxy client.
+		pc, err = openstack.NewClient(p.ao.IdentityEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("vkcloud: client: %w", err)
+		}
+		pc.HTTPClient = *p.httpClient
+		if err = openstack.Authenticate(ctx, pc, p.ao); err != nil {
+			return nil, fmt.Errorf("vkcloud: auth: %w", err)
+		}
+	} else {
+		pc, err = openstack.AuthenticatedClient(ctx, p.ao)
+		if err != nil {
+			return nil, fmt.Errorf("vkcloud: auth: %w", err)
+		}
 	}
 	nc, err := openstack.NewNetworkV2(pc, gophercloud.EndpointOpts{Region: p.region})
 	if err != nil {
@@ -101,4 +125,7 @@ func (p *Provider) Attach(ctx context.Context, ip provider.AllocatedIP, portID s
 	return err
 }
 
-var _ provider.Provider = (*Provider)(nil)
+var (
+	_ provider.Provider         = (*Provider)(nil)
+	_ provider.HTTPConfigurable = (*Provider)(nil)
+)

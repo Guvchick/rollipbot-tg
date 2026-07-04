@@ -113,6 +113,38 @@ func rolledBlock(rolled []string) string {
 	return sb.String()
 }
 
+// UpdateLimits maintains ONE auto-edited limits/quota message in the account's
+// topic, so limits stay visible and current without spamming. The message id is
+// stored (keyed by "limits:"+account) and edited in place; if the edit fails
+// (message deleted) it is re-sent.
+func (n *Notifier) UpdateLimits(ctx context.Context, b *bot.Bot, account, text string) {
+	if !n.Enabled() {
+		return
+	}
+	threadID := n.ensureTopic(ctx, b, account)
+	key := "limits:" + account
+	if msgID, ok, err := n.store.GetForumTopic(ctx, key); err == nil && ok {
+		if _, eerr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID: n.chatID, MessageID: msgID, Text: text, ParseMode: models.ParseModeHTML,
+		}); eerr == nil {
+			return
+		}
+		// edit failed (likely deleted) — fall through and re-send
+	}
+	params := &bot.SendMessageParams{ChatID: n.chatID, Text: text, ParseMode: models.ParseModeHTML}
+	if threadID != 0 {
+		params.MessageThreadID = threadID
+	}
+	m, err := b.SendMessage(ctx, params)
+	if err != nil {
+		n.log.Warn("limits message send failed", "topic", account, "err", err)
+		return
+	}
+	if err := n.store.SetForumTopic(ctx, key, m.ID); err != nil {
+		n.log.Warn("limits message id save failed", "err", err)
+	}
+}
+
 func (n *Notifier) post(ctx context.Context, b *bot.Bot, topic, text string) {
 	if !n.Enabled() {
 		return

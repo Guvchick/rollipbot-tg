@@ -21,6 +21,8 @@ const (
 	// add-account wizard
 	stepAddLabel // waiting for the account label
 	stepAddField // waiting for the current credential field value
+	// add-proxy wizard
+	stepProxyLine // waiting for the proxy host:port[:login:pass] line
 )
 
 // dialogState is the per-chat conversation state.
@@ -42,6 +44,9 @@ type dialogState struct {
 	AddFields []registry.Field  // credential schema for the type
 	AddIdx    int               // index of the field currently being collected
 	AddCreds  map[string]string // collected credential values
+
+	// add-proxy wizard
+	ProxyScheme string // socks5 | http
 }
 
 // FSM holds dialog state per chat behind a mutex.

@@ -67,6 +67,21 @@ func (r *Registry) Reload(ctx context.Context) error {
 			r.log.Warn("пропуск аккаунта", "id", a.ID, "provider", a.Provider, "label", a.Label, "err", err)
 			continue
 		}
+		// Route the account's API calls through its bound proxy, if any.
+		if px, ok, perr := r.store.AccountProxy(ctx, a.ID); perr != nil {
+			r.log.Warn("не смог прочитать прокси аккаунта", "id", a.ID, "err", perr)
+		} else if ok {
+			if cfgr, cok := inner.(provider.HTTPConfigurable); cok {
+				if cl, cerr := proxyHTTPClient(px); cerr != nil {
+					r.log.Warn("не смог собрать прокси-клиент", "id", a.ID, "proxy", px.ID, "err", cerr)
+				} else {
+					cfgr.SetHTTPClient(cl)
+					r.log.Info("аккаунт через прокси", "id", a.ID, "proxy", px.Label, "scheme", px.Scheme)
+				}
+			} else {
+				r.log.Warn("провайдер не поддерживает прокси", "provider", a.Provider)
+			}
+		}
 		acc := provider.NewAccount(inner, a.Provider, a.Label, a.ID)
 		byKey[acc.Key()] = acc
 		order = append(order, acc.Key())

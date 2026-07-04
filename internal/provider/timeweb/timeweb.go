@@ -52,6 +52,9 @@ func New(token, zone string, caps provider.RollCaps) *Provider {
 func (p *Provider) Name() string            { return "timeweb" }
 func (p *Provider) Caps() provider.RollCaps { return p.caps }
 
+// SetHTTPClient routes all REST calls through c (e.g. a proxy client).
+func (p *Provider) SetHTTPClient(c *http.Client) { p.client = c }
+
 // floatingIP mirrors the Timeweb FloatingIp model. `ip` is nullable (empty
 // while the address is still being provisioned); `resource_id`/`resource_type`
 // are null until the IP is bound to a server.
@@ -239,6 +242,7 @@ func (p *Provider) ListUnused(ctx context.Context) ([]provider.UnusedIP, error) 
 }
 
 var (
-	_ provider.Provider = (*Provider)(nil)
-	_ provider.Cleaner  = (*Provider)(nil)
+	_ provider.Provider         = (*Provider)(nil)
+	_ provider.Cleaner          = (*Provider)(nil)
+	_ provider.HTTPConfigurable = (*Provider)(nil)
 )
