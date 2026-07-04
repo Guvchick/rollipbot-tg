@@ -43,6 +43,7 @@ type StorageConfig struct {
 type ProvidersConfig struct {
 	Timeweb  *ProviderConfig `yaml:"timeweb"`
 	VKCloud  *ProviderConfig `yaml:"vkcloud"`
+	Yandex   *ProviderConfig `yaml:"yandex"`
 	Selectel *ProviderConfig `yaml:"selectel"`
 	Gcore    *ProviderConfig `yaml:"gcore"`
 	MWS      *ProviderConfig `yaml:"mws"`
@@ -76,6 +77,11 @@ type ProviderConfig struct {
 	FloatingNetworkID   string `yaml:"floating_network_id"`
 	FloatingIPQuota     int    `yaml:"floating_ip_quota"`
 
+	// VK Cloud password auth
+	Username       string `yaml:"username"`
+	Password       string `yaml:"password"`
+	UserDomainName string `yaml:"user_domain_name"`
+
 	// Selectel password auth
 	AccountID       string `yaml:"account_id"`
 	ServiceUser     string `yaml:"service_user"`
@@ -93,6 +99,10 @@ type ProviderConfig struct {
 
 	// RuVDS / Beget recreate strategies need a target server.
 	ServerID string `yaml:"server_id"`
+
+	// Yandex Cloud
+	OAuthToken string `yaml:"oauth_token"`
+	FolderID   string `yaml:"folder_id"`
 }
 
 // Caps builds engine roll caps from the config block.
@@ -127,6 +137,8 @@ func (p ProvidersConfig) Get(name string) *ProviderConfig {
 		return p.Timeweb
 	case "vkcloud":
 		return p.VKCloud
+	case "yandex":
+		return p.Yandex
 	case "selectel":
 		return p.Selectel
 	case "gcore":

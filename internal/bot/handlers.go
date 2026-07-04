@@ -96,6 +96,7 @@ func Run(
 		bot.WithCallbackQueryDataHandler("px:", bot.MatchTypePrefix, h.cbProxy),
 		bot.WithCallbackQueryDataHandler("pxscheme:", bot.MatchTypePrefix, h.cbProxyScheme),
 		bot.WithCallbackQueryDataHandler("accpx:", bot.MatchTypePrefix, h.cbAccountProxyBind),
+		bot.WithCallbackQueryDataHandler("acccap:", bot.MatchTypePrefix, h.cbAccountCap),
 		// roll wizard callbacks
 		bot.WithCallbackQueryDataHandler("prov:", bot.MatchTypePrefix, h.cbProvider),
 		bot.WithCallbackQueryDataHandler("mask:", bot.MatchTypePrefix, h.cbMask),
@@ -447,8 +448,20 @@ func (h *Handler) accountsView(ctx context.Context) (string, *models.InlineKeybo
 		if pxLabel != "" {
 			pxNote = " 🌐" + pxLabel
 		}
-		fmt.Fprintf(&sb, "• #%d %s [%s] — %s%s\n", a.ID, disp, flag, maskCreds(a.Provider, a.Credentials), pxNote)
-		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled, Proxy: pxLabel})
+		capMark := ""
+		if cap, ok, _ := h.store.AccountDailyCap(ctx, a.ID); ok {
+			if cap == 0 {
+				capMark = "∞"
+			} else {
+				capMark = strconv.Itoa(cap)
+			}
+		}
+		capNote := ""
+		if capMark != "" {
+			capNote = " 📅" + capMark + "/сут"
+		}
+		fmt.Fprintf(&sb, "• #%d %s [%s]%s%s — %s\n", a.ID, disp, flag, capNote, pxNote, maskCreds(a.Provider, a.Credentials))
+		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled, Proxy: pxLabel, DailyCap: capMark})
 	}
 	return sb.String(), accountsMenu(rows)
 }
@@ -724,6 +737,9 @@ func (h *Handler) cbAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
 	case strings.HasPrefix(data, "proxy:"):
 		h.cbAccountProxyPick(ctx, b, chatID, msgID, strings.TrimPrefix(data, "proxy:"))
 		return
+	case strings.HasPrefix(data, "cap:"):
+		h.cbAccountCapPick(ctx, b, chatID, msgID, strings.TrimPrefix(data, "cap:"))
+		return
 	case data == "addhelp": // legacy: text /addaccount help
 		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
 		return
@@ -869,6 +885,8 @@ func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.acceptAddField(ctx, b, chatID, u.Message.ID, text)
 	case stepProxyLine:
 		h.acceptProxyLine(ctx, b, chatID, u.Message.ID, text)
+	case stepDailyCap:
+		h.acceptDailyCap(ctx, b, chatID, text)
 	default:
 		h.send(ctx, b, chatID, "Открой меню кнопкой ниже или пришли /start.")
 	}
@@ -983,6 +1001,8 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 	if n := h.autoCleanupAccount(ctx, b, acc); n > 0 {
 		h.edit(ctx, b, chatID, msgID, fmt.Sprintf("🧹 Подчистил %d повисших IP. Начинаю ролл…", n), nil)
 	}
+	// Launch/refresh the per-account stats table in its topic at roll start.
+	h.postLimits(ctx, b, acc)
 
 	var lastEdit time.Time
 	var rolled []string // every address seen this run, for the forum topic

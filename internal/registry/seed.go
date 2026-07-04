@@ -25,14 +25,20 @@ func Fields(typ string) []Field {
 		return []Field{{"token", true, true}, {"availability_zone", false, false}}
 	case "vkcloud":
 		return []Field{
-			{"app_credential_id", true, true}, {"app_credential_secret", true, true},
-			{"floating_network_id", true, false}, {"auth_url", false, false}, {"region", false, false},
+			{"username", true, false}, {"password", true, true},
+			{"project_id", true, false}, {"floating_network_id", true, false},
+			{"auth_url", false, false}, {"region", false, false}, {"user_domain_name", false, false},
 		}
 	case "selectel":
 		return []Field{
 			{"account_id", true, false}, {"service_user", true, false}, {"service_password", true, true},
 			{"project_id", true, false}, {"floating_network_id", true, false},
 			{"auth_url", false, false}, {"region", false, false},
+		}
+	case "yandex":
+		return []Field{
+			{"oauth_token", true, true}, {"folder_id", true, false}, {"zone_id", true, false},
+			{"api_url", false, false},
 		}
 	case "gcore":
 		return []Field{
@@ -42,7 +48,7 @@ func Fields(typ string) []Field {
 	case "mws":
 		return []Field{
 			{"token", true, true}, {"project_id", true, false},
-			{"network_id", true, false}, {"subnetwork_id", true, false},
+			{"network_id", true, false}, {"subnetwork_id", true, false}, {"api_url", false, false},
 		}
 	case "ruvds":
 		return []Field{{"token", true, true}, {"server_id", true, false}}
@@ -94,11 +100,13 @@ func credsFromBlock(typ string, b *config.ProviderConfig) map[string]string {
 		put("token", b.Token)
 		put("availability_zone", b.AvailabilityZone)
 	case "vkcloud":
-		put("app_credential_id", b.AppCredentialID)
-		put("app_credential_secret", b.AppCredentialSecret)
+		put("username", b.Username)
+		put("password", b.Password)
+		put("project_id", b.ProjectID)
 		put("floating_network_id", b.FloatingNetworkID)
 		put("auth_url", b.AuthURL)
 		put("region", b.Region)
+		put("user_domain_name", b.UserDomainName)
 	case "selectel":
 		put("account_id", b.AccountID)
 		put("service_user", b.ServiceUser)
@@ -107,6 +115,11 @@ func credsFromBlock(typ string, b *config.ProviderConfig) map[string]string {
 		put("floating_network_id", b.FloatingNetworkID)
 		put("auth_url", b.AuthURL)
 		put("region", b.Region)
+	case "yandex":
+		put("oauth_token", b.OAuthToken)
+		put("folder_id", b.FolderID)
+		put("zone_id", b.Region)
+		put("api_url", b.APIURL)
 	case "gcore":
 		put("api_token", b.APIToken)
 		put("project_id", b.ProjectID)
@@ -119,6 +132,7 @@ func credsFromBlock(typ string, b *config.ProviderConfig) map[string]string {
 		put("project_id", b.ProjectID)
 		put("network_id", b.NetworkID)
 		put("subnetwork_id", b.SubnetworkID)
+		put("api_url", b.APIURL)
 	case "ruvds":
 		put("token", b.Token)
 		put("server_id", b.ServerID)

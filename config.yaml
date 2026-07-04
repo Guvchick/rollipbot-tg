@@ -46,17 +46,35 @@ providers:
 
   vkcloud:
     enabled: false
-    auth_url: https://infra.mail.ru:35357/v3/
-    region: RegionOne
-    app_credential_id: ${VK_APP_CRED_ID}
-    app_credential_secret: ${VK_APP_CRED_SECRET}
+    # VK Cloud API работает по логину/паролю (application credentials НЕ поддержаны).
+    # Значения бери из openrc-файла проекта (Настройки проекта → API-доступ).
+    auth_url: https://infra.mail.ru:35357/v3/   # OS_AUTH_URL
+    region: RegionOne                            # OS_REGION_NAME
+    user_domain_name: users                      # OS_USER_DOMAIN_NAME
+    username: ${VK_USERNAME}                      # OS_USERNAME (email)
+    password: ${VK_PASSWORD}                      # OS_PASSWORD
+    project_id: ${VK_PROJECT_ID}                 # OS_PROJECT_ID
     floating_network_id: ${VK_EXT_NET_ID}
     strategy: floating
     max_rolls_per_run: 40
     daily_cap: 0                # 0 = без дневного лимита, ограничивает квота
     floating_ip_quota: 50
     rate_limit_rps: 5
+    roll_delay_ms: 800          # джиттер/пауза между роллами
     masks: ["45.10.0.0/16"]
+
+  yandex:
+    enabled: false
+    # OAuth-токен Яндекса (бот обменяет на IAM). region = zone_id.
+    oauth_token: ${YC_OAUTH_TOKEN}
+    folder_id: ${YC_FOLDER_ID}
+    region: ru-central1-a        # zone_id: ru-central1-a|b|d
+    strategy: floating
+    max_rolls_per_run: 25
+    daily_cap: 0
+    rate_limit_rps: 5
+    roll_delay_ms: 1000
+    masks: ["51.250.0.0/16", "158.160.*.*"]
 
   selectel:
     enabled: false
@@ -88,6 +106,8 @@ providers:
 
   mws:
     enabled: false
+    # ⚠️ api.mws.ru не резолвится. Укажи реальную базу API из docs.cloud.mts.ru.
+    api_url: ${MWS_API_URL}     # напр. https://api.cloud.mts.ru
     token: ${MWS_TOKEN}
     project_id: ${MWS_PROJECT_ID}
     network_id: ${MWS_NETWORK_ID}

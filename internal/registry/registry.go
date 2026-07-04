@@ -21,11 +21,12 @@ import (
 	"ip-roller-bot/internal/provider/selectel"
 	"ip-roller-bot/internal/provider/timeweb"
 	"ip-roller-bot/internal/provider/vkcloud"
+	"ip-roller-bot/internal/provider/yandex"
 	"ip-roller-bot/internal/storage"
 )
 
 // Types lists every supported provider type (machine name).
-var Types = []string{"timeweb", "vkcloud", "selectel", "gcore", "mws", "ruvds", "beget"}
+var Types = []string{"timeweb", "vkcloud", "yandex", "selectel", "gcore", "mws", "ruvds", "beget"}
 
 // IsType reports whether t is a known provider type.
 func IsType(t string) bool {
@@ -62,7 +63,15 @@ func (r *Registry) Reload(ctx context.Context) error {
 	var order []string
 	for _, a := range accs {
 		block := r.cfg.Providers.Get(a.Provider)
-		inner, err := buildAdapter(a.Provider, a.Credentials, block, config.CapsOf(block))
+		caps := config.CapsOf(block)
+		// Per-account daily-cap override (set via the bot button) wins over the
+		// provider-type default.
+		if cap, ok, cerr := r.store.AccountDailyCap(ctx, a.ID); cerr != nil {
+			r.log.Warn("не смог прочитать дневной лимит аккаунта", "id", a.ID, "err", cerr)
+		} else if ok {
+			caps.DailyCap = cap
+		}
+		inner, err := buildAdapter(a.Provider, a.Credentials, block, caps)
 		if err != nil {
 			r.log.Warn("пропуск аккаунта", "id", a.ID, "provider", a.Provider, "label", a.Label, "err", err)
 			continue
@@ -142,12 +151,18 @@ func buildAdapter(typ string, creds map[string]string, b *config.ProviderConfig,
 		return timeweb.New(creds["token"], get("availability_zone", b.AvailabilityZone), caps), nil
 
 	case "vkcloud":
+		authURL := get("auth_url", b.AuthURL)
+		if authURL == "" {
+			authURL = "https://infra.mail.ru:35357/v3/"
+		}
 		return vkcloud.New(vkcloud.Config{
-			AuthURL:               get("auth_url", b.AuthURL),
-			Region:                get("region", b.Region),
-			ApplicationCredID:     creds["app_credential_id"],
-			ApplicationCredSecret: creds["app_credential_secret"],
-			FloatingNetworkID:     get("floating_network_id", b.FloatingNetworkID),
+			AuthURL:           authURL,
+			Region:            get("region", b.Region),
+			Username:          creds["username"],
+			Password:          creds["password"],
+			ProjectID:         creds["project_id"],
+			UserDomainName:    get("user_domain_name", "users"),
+			FloatingNetworkID: get("floating_network_id", b.FloatingNetworkID),
 		}, caps), nil
 
 	case "selectel":
@@ -177,8 +192,17 @@ func buildAdapter(typ string, creds map[string]string, b *config.ProviderConfig,
 			RegionID:  regionID,
 		}, caps), nil
 
+	case "yandex":
+		return yandex.New(yandex.Config{
+			APIURL:     get("api_url", b.APIURL),
+			OAuthToken: creds["oauth_token"],
+			FolderID:   creds["folder_id"],
+			ZoneID:     get("zone_id", b.Region),
+		}, caps), nil
+
 	case "mws":
 		return mws.New(mws.Config{
+			APIURL:       get("api_url", b.APIURL),
 			Token:        creds["token"],
 			ProjectID:    creds["project_id"],
 			NetworkID:    creds["network_id"],

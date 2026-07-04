@@ -1,5 +1,7 @@
 // Package vkcloud implements the Provider for VK Cloud (OpenStack/Neutron
-// floating IPs) via gophercloud, authenticating with an Application Credential.
+// floating IPs) via gophercloud. VK Cloud's Keystone only enables the password,
+// token, oauth1 and oidc auth methods (NOT application_credential), so we
+// authenticate project-scoped with username + password + user domain.
 package vkcloud
 
 import (
@@ -17,11 +19,13 @@ import (
 )
 
 type Config struct {
-	AuthURL               string
-	Region                string
-	ApplicationCredID     string
-	ApplicationCredSecret string
-	FloatingNetworkID     string
+	AuthURL           string
+	Region            string
+	Username          string
+	Password          string
+	ProjectID         string
+	UserDomainName    string
+	FloatingNetworkID string
 }
 
 type Provider struct {
@@ -44,11 +48,17 @@ func (p *Provider) SetHTTPClient(c *http.Client) {
 }
 
 func New(cfg Config, caps provider.RollCaps) *Provider {
+	domain := cfg.UserDomainName
+	if domain == "" {
+		domain = "users" // VK Cloud default user domain
+	}
 	ao := gophercloud.AuthOptions{
-		IdentityEndpoint:            cfg.AuthURL,
-		ApplicationCredentialID:     cfg.ApplicationCredID,
-		ApplicationCredentialSecret: cfg.ApplicationCredSecret,
-		AllowReauth:                 true,
+		IdentityEndpoint: cfg.AuthURL,
+		Username:         cfg.Username,
+		Password:         cfg.Password,
+		DomainName:       domain,        // domain the user lives in
+		TenantID:         cfg.ProjectID, // project-scoped token
+		AllowReauth:      true,
 	}
 	return &Provider{ao: ao, region: cfg.Region, extNetID: cfg.FloatingNetworkID, caps: caps}
 }

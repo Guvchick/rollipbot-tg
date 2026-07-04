@@ -105,6 +105,11 @@ type Storage interface {
 	AddAllowedUser(ctx context.Context, u AllowedUser) error
 	RemoveAllowedUser(ctx context.Context, userID int64) error
 
+	// Per-account daily-cap override (rolls/day). ok=false means "use type default".
+	SetAccountDailyCap(ctx context.Context, accountID int64, cap int) error
+	ClearAccountDailyCap(ctx context.Context, accountID int64) error
+	AccountDailyCap(ctx context.Context, accountID int64) (cap int, ok bool, err error)
+
 	// Proxies and per-account bindings
 	ListProxies(ctx context.Context) ([]Proxy, error)
 	GetProxy(ctx context.Context, id int64) (Proxy, error)

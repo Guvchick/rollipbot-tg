@@ -14,6 +14,7 @@ import (
 var typeNames = map[string]string{
 	"timeweb":  "Timeweb",
 	"vkcloud":  "VK Cloud",
+	"yandex":   "Yandex Cloud",
 	"selectel": "Selectel",
 	"gcore":    "Gcore",
 	"mws":      "MWS",
@@ -73,8 +74,13 @@ func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
 		if a.Proxy != "" {
 			px = "🌐✓"
 		}
+		cap := "📅"
+		if a.DailyCap != "" {
+			cap = "📅" + a.DailyCap
+		}
 		rows = append(rows, []models.InlineKeyboardButton{
 			{Text: fmt.Sprintf("%s %s", flag, a.Display), CallbackData: fmt.Sprintf("acc:toggle:%d", a.ID)},
+			{Text: cap, CallbackData: fmt.Sprintf("acc:cap:%d", a.ID)},
 			{Text: px, CallbackData: fmt.Sprintf("acc:proxy:%d", a.ID)},
 			{Text: "🗑", CallbackData: fmt.Sprintf("acc:del:%d", a.ID)},
 		})
@@ -134,10 +140,33 @@ func addDoneKeyboard() *models.InlineKeyboardMarkup {
 
 // accountRow is the minimal account view the keyboard needs.
 type accountRow struct {
-	ID      int64
-	Display string
-	Enabled bool
-	Proxy   string // bound proxy label, empty if none
+	ID       int64
+	Display  string
+	Enabled  bool
+	Proxy    string // bound proxy label, empty if none
+	DailyCap string // per-account cap marker (e.g. "10" or "∞"), empty if type default
+}
+
+// dailyCapPicker offers preset rolls-per-day caps plus custom/unlimited/default.
+func dailyCapPicker(accountID int64) *models.InlineKeyboardMarkup {
+	presets := []int{5, 10, 25, 50, 100}
+	var row []models.InlineKeyboardButton
+	for _, n := range presets {
+		row = append(row, models.InlineKeyboardButton{
+			Text: fmt.Sprintf("%d", n), CallbackData: fmt.Sprintf("acccap:%d:%d", accountID, n),
+		})
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		row,
+		{
+			{Text: "♾ Без лимита", CallbackData: fmt.Sprintf("acccap:%d:0", accountID)},
+			{Text: "✏️ Своё", CallbackData: fmt.Sprintf("acccap:%d:custom", accountID)},
+		},
+		{
+			{Text: "↩️ По умолчанию", CallbackData: fmt.Sprintf("acccap:%d:default", accountID)},
+			{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"},
+		},
+	}}
 }
 
 // proxiesMenu lists proxies (delete each) plus add + back.

@@ -64,14 +64,29 @@ func (h *Handler) statsText(ctx context.Context, stats []storage.ProviderStat) s
 	return sb.String()
 }
 
-// postLimits maintains an auto-edited limits/quota snapshot in the account's
-// forum topic (replaces the removed "Лимиты" button).
+// accountStat returns the roll-history aggregate for one account key.
+func (h *Handler) accountStat(ctx context.Context, key string) storage.ProviderStat {
+	stats, err := h.store.RollStats(ctx)
+	if err != nil {
+		return storage.ProviderStat{Provider: key}
+	}
+	for _, s := range stats {
+		if s.Provider == key {
+			return s
+		}
+	}
+	return storage.ProviderStat{Provider: key}
+}
+
+// postLimits maintains ONE auto-edited per-account stats+limits table in the
+// account's forum topic (replaces the removed "Лимиты" button). Called at roll
+// start and after each roll, so the topic always shows the current picture.
 func (h *Handler) postLimits(ctx context.Context, b *bot.Bot, acc *provider.Account) {
 	if !h.notifier.Enabled() {
 		return
 	}
 	caps := acc.Caps()
-	limit := "квота провайдера (без дневного лимита)"
+	limit := "по квоте провайдера (без дневного лимита)"
 	if caps.DailyCap > 0 {
 		limit = fmt.Sprintf("сегодня %d/%d (осталось %d)",
 			h.engine.DailyUsed(acc.Key()), caps.DailyCap, h.engine.DailyRemaining(acc.Key(), caps.DailyCap))
@@ -80,7 +95,18 @@ func (h *Handler) postLimits(ctx context.Context, b *bot.Bot, acc *provider.Acco
 	if until, ok := h.engine.Cooldown(acc.Key()); ok {
 		cd = "\n⛔ Квота исчерпана до " + until.Local().Format("02.01.2006 15:04 MST")
 	}
-	text := fmt.Sprintf("📊 <b>Лимиты · %s</b>\nrps=%.0f · задержка ролла=%s\n%s%s\nОбновлено: %s",
-		accountDisplay(acc), caps.RateLimitRPS, caps.RollDelay, limit, cd, time.Now().Format("02.01 15:04:05"))
+	s := h.accountStat(ctx, acc.Key())
+	text := fmt.Sprintf(
+		"📊 <b>Статистика · %s</b>\n"+
+			"<blockquote>"+
+			"Всего роллов: %d\n"+
+			"Поймано IP: %d\n"+
+			"Освобождено: %d\n"+
+			"Сегодня роллов: %d\n"+
+			"Дневной лимит: %s\n"+
+			"rps=%.0f · задержка=%s"+
+			"</blockquote>%s\nОбновлено: %s",
+		accountDisplay(acc), s.Total, s.Matched, s.Released, s.Today, limit,
+		caps.RateLimitRPS, caps.RollDelay, cd, time.Now().Format("02.01 15:04:05"))
 	h.notifier.UpdateLimits(ctx, b, accountDisplay(acc), text)
 }

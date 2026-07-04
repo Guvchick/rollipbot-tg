@@ -10,14 +10,19 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"ip-roller-bot/internal/provider"
 )
 
+// MWS Cloud Platform is a young public cloud (2025); its API host/paths vary by
+// installation, so the base URL is configurable (api_url). api.mws.ru does NOT
+// resolve — set api_url to the real endpoint from docs.cloud.mts.ru.
 const defaultBaseURL = "https://api.mws.ru"
 
 type Config struct {
+	APIURL       string
 	Token        string
 	ProjectID    string
 	NetworkID    string
@@ -33,9 +38,13 @@ type Provider struct {
 }
 
 func New(cfg Config, caps provider.RollCaps) *Provider {
+	base := cfg.APIURL
+	if base == "" {
+		base = defaultBaseURL
+	}
 	return &Provider{
 		token:  cfg.Token,
-		base:   defaultBaseURL,
+		base:   strings.TrimRight(base, "/"),
 		cfg:    cfg,
 		client: &http.Client{Timeout: 30 * time.Second},
 		caps:   caps,

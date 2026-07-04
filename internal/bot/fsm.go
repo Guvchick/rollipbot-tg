@@ -23,6 +23,8 @@ const (
 	stepAddField // waiting for the current credential field value
 	// add-proxy wizard
 	stepProxyLine // waiting for the proxy host:port[:login:pass] line
+	// per-account custom daily cap
+	stepDailyCap // waiting for a custom rolls-per-day number
 )
 
 // dialogState is the per-chat conversation state.
@@ -47,6 +49,9 @@ type dialogState struct {
 
 	// add-proxy wizard
 	ProxyScheme string // socks5 | http
+
+	// per-account custom daily cap
+	CapAccountID int64
 }
 
 // FSM holds dialog state per chat behind a mutex.

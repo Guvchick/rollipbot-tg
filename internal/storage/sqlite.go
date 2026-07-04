@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS proxies (
 CREATE TABLE IF NOT EXISTS account_proxy (
     account_id INTEGER PRIMARY KEY,
     proxy_id   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_daily_cap (
+    account_id INTEGER PRIMARY KEY,
+    daily_cap  INTEGER NOT NULL
 );`
 
 // SQLite is a modernc.org/sqlite-backed Storage.
@@ -418,6 +422,33 @@ func (s *SQLite) AccountProxy(ctx context.Context, accountID int64) (Proxy, bool
 		return Proxy{}, false, err
 	}
 	return p, true, nil
+}
+
+// --- per-account daily cap override ---
+
+func (s *SQLite) SetAccountDailyCap(ctx context.Context, accountID int64, cap int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO account_daily_cap (account_id, daily_cap) VALUES (?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET daily_cap = excluded.daily_cap`,
+		accountID, cap)
+	return err
+}
+
+func (s *SQLite) ClearAccountDailyCap(ctx context.Context, accountID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM account_daily_cap WHERE account_id = ?`, accountID)
+	return err
+}
+
+func (s *SQLite) AccountDailyCap(ctx context.Context, accountID int64) (int, bool, error) {
+	var cap int
+	err := s.db.QueryRowContext(ctx, `SELECT daily_cap FROM account_daily_cap WHERE account_id = ?`, accountID).Scan(&cap)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return cap, true, nil
 }
 
 // --- stats ---

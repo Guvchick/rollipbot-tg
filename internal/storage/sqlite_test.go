@@ -57,6 +57,37 @@ func TestProxiesCRUDAndBinding(t *testing.T) {
 	}
 }
 
+func TestAccountDailyCapOverride(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	accID, err := st.UpsertAccount(ctx, Account{Provider: "timeweb", Label: "a", Enabled: true, Credentials: map[string]string{"token": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.AccountDailyCap(ctx, accID); ok {
+		t.Fatal("no override should exist initially")
+	}
+	if err := st.SetAccountDailyCap(ctx, accID, 7); err != nil {
+		t.Fatal(err)
+	}
+	if cap, ok, _ := st.AccountDailyCap(ctx, accID); !ok || cap != 7 {
+		t.Fatalf("override = %d ok=%v, want 7", cap, ok)
+	}
+	// 0 is a valid override (unlimited), distinct from "not set"
+	if err := st.SetAccountDailyCap(ctx, accID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if cap, ok, _ := st.AccountDailyCap(ctx, accID); !ok || cap != 0 {
+		t.Fatalf("override = %d ok=%v, want 0/true", cap, ok)
+	}
+	if err := st.ClearAccountDailyCap(ctx, accID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.AccountDailyCap(ctx, accID); ok {
+		t.Error("override should be gone after clear")
+	}
+}
+
 func TestRollStats(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)
