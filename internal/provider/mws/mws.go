@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,12 +59,27 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 		base = defaultBaseURL
 	}
 	return &Provider{
-		token:  cfg.Token,
+		token:  sanitizeToken(cfg.Token),
 		base:   strings.TrimRight(base, "/"),
 		cfg:    cfg,
 		client: &http.Client{Timeout: 30 * time.Second},
 		caps:   caps,
 	}
+}
+
+// sanitizeToken removes whitespace/newlines a token can pick up when pasted
+// (Telegram soft-wrapping, copy artifacts). A valid IAM/JWS token has none.
+func sanitizeToken(s string) string {
+	return strings.Join(strings.Fields(s), "")
+}
+
+// mapErr turns MWS's 401 into an actionable message about the IAM token.
+func mapErr(err error) error {
+	var apiErr *provider.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("mws: IAM-токен недействителен или протух — обнови (mws iam create-token) и перезапиши поле token: %w", err)
+	}
+	return err
 }
 
 func (p *Provider) Name() string            { return "mws" }
@@ -127,7 +143,7 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 	}
 	var ea externalAddress
 	if err := provider.DoJSON(p.client, req, p.Name(), &ea); err != nil {
-		return provider.AllocatedIP{}, err
+		return provider.AllocatedIP{}, mapErr(err)
 	}
 	// The delete path uses the NAME, so that (not metadata.id) is our resource id.
 	id := firstNonEmpty(ea.Metadata.Name, name)

@@ -85,6 +85,16 @@ func TestAllocatePollsWhenIPPending(t *testing.T) {
 	}
 }
 
+func TestSanitizeToken(t *testing.T) {
+	// line-wrapped / spaced paste artifacts are stripped; a clean token is unchanged
+	if got := sanitizeToken("eyJhbG.ab\ncd\n.sig"); got != "eyJhbG.abcd.sig" {
+		t.Errorf("sanitizeToken wrapped = %q", got)
+	}
+	if got := sanitizeToken("  eyJ.a.b  "); got != "eyJ.a.b" {
+		t.Errorf("sanitizeToken trim = %q", got)
+	}
+}
+
 func TestDefaultBaseURL(t *testing.T) {
 	p := New(Config{Token: "t", ProjectID: "p"}, provider.RollCaps{})
 	if p.base != "https://vpc.mwsapis.ru" {
