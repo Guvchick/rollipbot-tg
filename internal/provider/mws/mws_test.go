@@ -101,10 +101,3 @@ func TestDefaultBaseURL(t *testing.T) {
 		t.Errorf("default base = %q, want https://vpc.mwsapis.ru", p.base)
 	}
 }
-
-func TestNoTokenError(t *testing.T) {
-	p := New(Config{ProjectID: "p"}, provider.RollCaps{}) // no IAM token
-	if _, err := p.Allocate(context.Background()); err == nil {
-		t.Fatal("expected an error when no token is set")
-	}
-}

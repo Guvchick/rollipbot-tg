@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"ip-roller-bot/internal/provider"
@@ -30,6 +31,7 @@ import (
 
 const (
 	defaultBaseURL = "https://vpc.mwsapis.ru"
+	defaultIAMURL  = "https://iam.mwsapis.ru"
 
 	// The address may be assigned asynchronously — poll status.ipAddress.
 	pollInterval = 700 * time.Millisecond
@@ -37,20 +39,28 @@ const (
 )
 
 type Config struct {
-	APIURL       string // vpc base, defaults to https://vpc.mwsapis.ru
-	Token        string // IAM token (Bearer), e.g. from `mws iam create-token`
-	ProjectID    string
-	Region       string // optional (unused by externalAddresses, kept for compat)
-	NetworkID    string // optional
-	SubnetworkID string // optional
+	APIURL        string // vpc base, defaults to https://vpc.mwsapis.ru
+	IAMURL        string // iam base, defaults to https://iam.mwsapis.ru
+	AuthorizedKey string // JSON of the authorized (ES256) key — bot signs the JWT itself
+	Token         string // OR a ready IAM token (Bearer), e.g. from `mws iam create-token`
+	ProjectID     string
+	Region        string // optional (unused by externalAddresses, kept for compat)
+	NetworkID     string // optional
+	SubnetworkID  string // optional
 }
 
 type Provider struct {
-	token  string
-	base   string
-	cfg    Config
-	client *http.Client
-	caps   provider.RollCaps
+	token       string
+	authKeyJSON string
+	base        string
+	iamBase     string
+	cfg         Config
+	client      *http.Client
+	caps        provider.RollCaps
+
+	mu     sync.Mutex
+	iam    string
+	iamExp time.Time
 }
 
 func New(cfg Config, caps provider.RollCaps) *Provider {
@@ -58,23 +68,43 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 	if base == "" {
 		base = defaultBaseURL
 	}
+	iamBase := cfg.IAMURL
+	if iamBase == "" {
+		iamBase = defaultIAMURL
+	}
 	return &Provider{
-		token:  sanitizeToken(cfg.Token),
-		base:   strings.TrimRight(base, "/"),
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
-		caps:   caps,
+		token:       sanitizeToken(cfg.Token),
+		authKeyJSON: strings.TrimSpace(cfg.AuthorizedKey),
+		base:        strings.TrimRight(base, "/"),
+		iamBase:     strings.TrimRight(iamBase, "/"),
+		cfg:         cfg,
+		client:      &http.Client{Timeout: 30 * time.Second},
+		caps:        caps,
 	}
 }
 
 // bearer returns the IAM token to send. MWS's VPC API needs a real IAM token
 // (a signed JWS), NOT the static v1.… API key (that one is only for Artifact
-// Registry / GPT). Get it via `mws iam create-token`.
-func (p *Provider) bearer(_ context.Context) (string, error) {
-	if p.token == "" {
-		return "", fmt.Errorf("mws: не задан IAM-токен (token). Получи: mws iam create-token")
+// Registry / GPT). Preferred: an authorized key the bot signs into a JWT and
+// exchanges (auto-refresh). Fallback: a ready token from `mws iam create-token`.
+func (p *Provider) bearer(ctx context.Context) (string, error) {
+	if p.token != "" {
+		return p.token, nil
 	}
-	return p.token, nil
+	if p.authKeyJSON == "" {
+		return "", fmt.Errorf("mws: нет authorized_key и token — добавь авторизованный ключ (JSON) или IAM-токен")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
+		return p.iam, nil
+	}
+	tok, exp, err := p.issueIAMToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	p.iam, p.iamExp = tok, exp
+	return tok, nil
 }
 
 // sanitizeToken removes whitespace/newlines a token can pick up when pasted

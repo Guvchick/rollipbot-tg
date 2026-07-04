@@ -46,9 +46,10 @@ func Fields(typ string) []Field {
 			{"api_url", false, false},
 		}
 	case "mws":
+		// Provide authorized_key (recommended, auto-refresh) OR a ready token.
 		return []Field{
-			{"token", true, true}, {"project_id", true, false},
-			{"api_url", false, false}, {"region", false, false},
+			{"authorized_key", false, true}, {"token", false, true}, {"project_id", true, false},
+			{"api_url", false, false}, {"iam_url", false, false}, {"region", false, false},
 			{"network_id", false, false}, {"subnetwork_id", false, false},
 		}
 	case "ruvds":
@@ -134,6 +135,7 @@ func credsFromBlock(typ string, b *config.ProviderConfig) map[string]string {
 		put("network_id", b.NetworkID)
 		put("subnetwork_id", b.SubnetworkID)
 		put("api_url", b.APIURL)
+		put("iam_url", b.IAMURL)
 	case "ruvds":
 		put("token", b.Token)
 		put("server_id", b.ServerID)

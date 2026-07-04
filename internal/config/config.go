@@ -91,6 +91,7 @@ type ProviderConfig struct {
 	// MWS
 	NetworkID    string `yaml:"network_id"`
 	SubnetworkID string `yaml:"subnetwork_id"`
+	IAMURL       string `yaml:"iam_url"` // MWS IAM base (JWT→token exchange)
 
 	// Gcore
 	APIURL   string `yaml:"api_url"`
