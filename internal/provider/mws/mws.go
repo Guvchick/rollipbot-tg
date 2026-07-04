@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"ip-roller-bot/internal/provider"
@@ -30,6 +31,9 @@ import (
 
 const (
 	defaultBaseURL = "https://vpc.mwsapis.ru"
+	defaultIAMURL  = "https://iam.mwsapis.ru"
+	// Custom method to exchange a service-account API key for an IAM token.
+	issueTokenPath = "/iam/v2/tokens/:issueServiceAccountToken"
 
 	// The address may be assigned asynchronously — poll status.ipAddress.
 	pollInterval = 700 * time.Millisecond
@@ -37,8 +41,10 @@ const (
 )
 
 type Config struct {
-	APIURL       string // base, defaults to https://vpc.mwsapis.ru
-	Token        string // IAM token (Bearer)
+	APIURL       string // vpc base, defaults to https://vpc.mwsapis.ru
+	IAMURL       string // iam base, defaults to https://iam.mwsapis.ru
+	APIKey       string // service-account API key (v1.…) — exchanged for an IAM token
+	Token        string // OR a ready IAM token (Bearer), e.g. from `mws iam create-token`
 	ProjectID    string
 	Region       string // optional (unused by externalAddresses, kept for compat)
 	NetworkID    string // optional
@@ -46,11 +52,17 @@ type Config struct {
 }
 
 type Provider struct {
-	token  string
-	base   string
-	cfg    Config
-	client *http.Client
-	caps   provider.RollCaps
+	directToken string
+	apiKey      string
+	base        string
+	iamBase     string
+	cfg         Config
+	client      *http.Client
+	caps        provider.RollCaps
+
+	mu     sync.Mutex
+	iam    string
+	iamExp time.Time
 }
 
 func New(cfg Config, caps provider.RollCaps) *Provider {
@@ -58,13 +70,63 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 	if base == "" {
 		base = defaultBaseURL
 	}
-	return &Provider{
-		token:  sanitizeToken(cfg.Token),
-		base:   strings.TrimRight(base, "/"),
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
-		caps:   caps,
+	iamBase := cfg.IAMURL
+	if iamBase == "" {
+		iamBase = defaultIAMURL
 	}
+	return &Provider{
+		directToken: sanitizeToken(cfg.Token),
+		apiKey:      sanitizeToken(cfg.APIKey),
+		base:        strings.TrimRight(base, "/"),
+		iamBase:     strings.TrimRight(iamBase, "/"),
+		cfg:         cfg,
+		client:      &http.Client{Timeout: 30 * time.Second},
+		caps:        caps,
+	}
+}
+
+// bearer returns the IAM token to send: a directly-provided one, or one obtained
+// by exchanging the service-account API key (cached until it nears expiry).
+func (p *Provider) bearer(ctx context.Context) (string, error) {
+	if p.directToken != "" {
+		return p.directToken, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
+		return p.iam, nil
+	}
+	if p.apiKey == "" {
+		return "", fmt.Errorf("mws: не задан ни api_key, ни token (IAM)")
+	}
+	body, _ := json.Marshal(map[string]any{"apiKey": p.apiKey})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.iamBase+issueTokenPath, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	// Tolerate the several field names the token/expiry may come back under.
+	var resp struct {
+		Token      string `json:"token"`
+		IAMToken   string `json:"iamToken"`
+		ExpiresAt  string `json:"expiresAt"`
+		ExpiresAt2 string `json:"expireTime"`
+	}
+	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
+		return "", fmt.Errorf("mws: обмен api_key→IAM: %w", err)
+	}
+	tok := firstNonEmpty(resp.Token, resp.IAMToken)
+	if tok == "" {
+		return "", fmt.Errorf("mws: пустой IAM-токен в ответе обмена")
+	}
+	p.iam = tok
+	if t, err := time.Parse(time.RFC3339, firstNonEmpty(resp.ExpiresAt, resp.ExpiresAt2)); err == nil {
+		p.iamExp = t
+	} else {
+		p.iamExp = time.Now().Add(50 * time.Minute)
+	}
+	return tok, nil
 }
 
 // sanitizeToken removes whitespace/newlines a token can pick up when pasted
@@ -73,11 +135,11 @@ func sanitizeToken(s string) string {
 	return strings.Join(strings.Fields(s), "")
 }
 
-// mapErr turns MWS's 401 into an actionable message about the IAM token.
+// mapErr turns MWS's 401 into an actionable message about the credentials.
 func mapErr(err error) error {
 	var apiErr *provider.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("mws: IAM-токен недействителен или протух — обнови (mws iam create-token) и перезапиши поле token: %w", err)
+		return fmt.Errorf("mws: доступ не принят — проверь api_key (v1.…) сервисного аккаунта или свежий IAM-токен (token): %w", err)
 	}
 	return err
 }
@@ -101,11 +163,15 @@ func (p *Provider) newReq(ctx context.Context, method, path string, body any) (*
 		}
 		r = bytes.NewReader(b)
 	}
+	tok, err := p.bearer(ctx)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, p.base+path, r)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	return req, nil

@@ -72,13 +72,14 @@ var providerGuides = map[string]providerGuide{
 	"mws": {
 		title: "MWS Cloud Platform (MTS Web Services)",
 		steps: []string{
-			"Создай сервисный аккаунт (IAM) и авторизованный ключ для него.",
-			"Получи IAM-токен: проще всего утилитой MWS CLI — команда `mws iam create-token`. Скопируй вывод в поле token.",
-			"⚠️ IAM-токен живёт недолго — при протухании обнови его в аккаунте (перезапиши token новым значением).",
+			"Создай сервисный аккаунт (IAM) → вкладка «Ключи доступа» → «Создать» → тип «API-ключ».",
+			"Скопируй значение API-ключа (начинается с v1.…) в поле api_key. ⚠️ показывается один раз.",
+			"Бот сам обменяет api_key на короткоживущий IAM-токен и будет обновлять его — вручную ничего делать не надо.",
 			"project_id — ID проекта (…/projects/<project_id>/…).",
-			"Публичный IP роллится ресурсом externalAddresses на https://vpc.mwsapis.ru — это дефолт, api_url можно не указывать.",
+			"Публичный IP роллится ресурсом externalAddresses (https://vpc.mwsapis.ru, обмен — https://iam.mwsapis.ru) — дефолты, ничего не указывать.",
+			"Альтернатива: если хочешь, можешь вместо api_key дать готовый IAM-токен в поле token (mws iam create-token), но он короткоживущий.",
 		},
-		example: `/addaccount mws prod {"token":"IAM_TOKEN","project_id":"P"}`,
+		example: `/addaccount mws prod {"api_key":"v1.…","project_id":"P"}`,
 	},
 	"ruvds": {
 		title: "RuVDS",
@@ -139,9 +140,11 @@ var fieldHints = map[string]map[string]string{
 		"api_url":    "Обычно дефолтный. Необязательно — можно пропустить.",
 	},
 	"mws": {
-		"token":         "IAM-токен (Bearer): `mws iam create-token` в MWS CLI. Живёт недолго — обновляй при протухании.",
+		"api_key":       "API-ключ сервисного аккаунта (v1.…): IAM → сервисный аккаунт → «Ключи доступа» → API-ключ. Бот сам обменяет на IAM-токен.",
+		"token":         "Альтернатива api_key: готовый IAM-токен (mws iam create-token). Короткоживущий — лучше api_key.",
 		"project_id":    "ID проекта: из адреса …/projects/<id>/… или свойств проекта.",
-		"api_url":       "База API. По умолчанию https://vpc.mwsapis.ru — обычно можно пропустить.",
+		"api_url":       "База VPC API. По умолчанию https://vpc.mwsapis.ru — пропусти.",
+		"iam_url":       "База IAM (обмен ключа на токен). По умолчанию https://iam.mwsapis.ru — пропусти.",
 		"region":        "Регион, если требуется. Необязательно.",
 		"network_id":    "Обычно НЕ нужен для внешнего адреса. Необязательно.",
 		"subnetwork_id": "Обычно НЕ нужен для внешнего адреса. Необязательно.",

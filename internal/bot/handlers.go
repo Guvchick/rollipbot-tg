@@ -536,17 +536,18 @@ func (h *Handler) cmdAddAccount(ctx context.Context, b *bot.Bot, u *models.Updat
 	h.send(ctx, b, chatID, fmt.Sprintf("✅ Аккаунт сохранён: #%d %s · %s%s", id, typeName(typ), label, hygiene))
 }
 
-// singleRequiredField returns the sole required credential field for a type, or
-// "" when it needs zero or several required fields.
+// singleRequiredField returns the sole required credential field for a type, but
+// only when it is a secret — so a bare pasted value is only ever taken as a
+// token/secret, never as a plain id (e.g. project_id). Returns "" otherwise.
 func singleRequiredField(typ string) string {
-	var req []string
+	var req []registry.Field
 	for _, f := range registry.Fields(typ) {
 		if f.Required {
-			req = append(req, f.Name)
+			req = append(req, f)
 		}
 	}
-	if len(req) == 1 {
-		return req[0]
+	if len(req) == 1 && req[0].Secret {
+		return req[0].Name
 	}
 	return ""
 }
