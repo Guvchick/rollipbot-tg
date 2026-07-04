@@ -48,7 +48,8 @@ func Fields(typ string) []Field {
 	case "mws":
 		return []Field{
 			{"token", true, true}, {"project_id", true, false},
-			{"network_id", true, false}, {"subnetwork_id", true, false}, {"api_url", false, false},
+			{"api_url", false, false}, {"region", false, false},
+			{"network_id", false, false}, {"subnetwork_id", false, false},
 		}
 	case "ruvds":
 		return []Field{{"token", true, true}, {"server_id", true, false}}

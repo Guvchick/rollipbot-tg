@@ -205,6 +205,7 @@ func buildAdapter(typ string, creds map[string]string, b *config.ProviderConfig,
 			APIURL:       get("api_url", b.APIURL),
 			Token:        creds["token"],
 			ProjectID:    creds["project_id"],
+			Region:       get("region", b.Region),
 			NetworkID:    creds["network_id"],
 			SubnetworkID: creds["subnetwork_id"],
 		}, caps), nil

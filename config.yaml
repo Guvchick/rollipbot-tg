@@ -106,12 +106,11 @@ providers:
 
   mws:
     enabled: false
-    # ⚠️ api.mws.ru не резолвится. Укажи реальную базу API из docs.cloud.mts.ru.
-    api_url: ${MWS_API_URL}     # напр. https://api.cloud.mts.ru
+    # Публичный IP = ресурс externalAddresses на https://vpc.mwsapis.ru (дефолт).
+    # token — IAM-токен: `mws iam create-token` (живёт недолго, обновляй).
+    api_url: https://vpc.mwsapis.ru
     token: ${MWS_TOKEN}
     project_id: ${MWS_PROJECT_ID}
-    network_id: ${MWS_NETWORK_ID}
-    subnetwork_id: ${MWS_SUBNET_ID}
     strategy: floating
     max_rolls_per_run: 10
     daily_cap: 10               # ≤10 новых IP/сутки (мягкий предохранитель)

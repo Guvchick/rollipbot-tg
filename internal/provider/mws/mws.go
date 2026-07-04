@@ -1,5 +1,16 @@
-// Package mws implements the Provider for MWS Cloud public IPs by reserving an
-// address in a subnetwork. Docs: https://mws.ru/docs/cloud-platform/api/
+// Package mws implements the Provider for MWS Cloud Platform (MTS Web Services)
+// public IPs. Rolling creates an *external* address (by name), reads the
+// assigned status.ipAddress, and deletes it (by name) if it doesn't match.
+//
+// Confirmed from mws.ru/docs/cloud-platform/api (vpc externalAddresses):
+//
+//	host:   https://vpc.mwsapis.ru        (api.mws.ru is dead)
+//	create: POST   /vpc/v1/projects/{project}/externalAddresses/{name}?createOnly=true
+//	get:    GET    /vpc/v1/projects/{project}/externalAddresses/{name}
+//	delete: DELETE /vpc/v1/projects/{project}/externalAddresses/{name}
+//	auth:   Authorization: Bearer <IAM-token>   (mws iam create-token)
+//	body:   {"kind":"vpc/v1/externalAddress","metadata":{"name":"..."}}
+//	ip:     response.status.ipAddress ; id for release = metadata.name
 package mws
 
 import (
@@ -16,17 +27,21 @@ import (
 	"ip-roller-bot/internal/provider"
 )
 
-// MWS Cloud Platform is a young public cloud (2025); its API host/paths vary by
-// installation, so the base URL is configurable (api_url). api.mws.ru does NOT
-// resolve — set api_url to the real endpoint from docs.cloud.mts.ru.
-const defaultBaseURL = "https://api.mws.ru"
+const (
+	defaultBaseURL = "https://vpc.mwsapis.ru"
+
+	// The address may be assigned asynchronously — poll status.ipAddress.
+	pollInterval = 700 * time.Millisecond
+	pollTimeout  = 25 * time.Second
+)
 
 type Config struct {
-	APIURL       string
-	Token        string
+	APIURL       string // base, defaults to https://vpc.mwsapis.ru
+	Token        string // IAM token (Bearer)
 	ProjectID    string
-	NetworkID    string
-	SubnetworkID string
+	Region       string // optional (unused by externalAddresses, kept for compat)
+	NetworkID    string // optional
+	SubnetworkID string // optional
 }
 
 type Provider struct {
@@ -54,9 +69,11 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 func (p *Provider) Name() string            { return "mws" }
 func (p *Provider) Caps() provider.RollCaps { return p.caps }
 
-func (p *Provider) ipsPath() string {
-	return fmt.Sprintf("/v1/projects/%s/networks/%s/subnetworks/%s/ips",
-		p.cfg.ProjectID, p.cfg.NetworkID, p.cfg.SubnetworkID)
+// SetHTTPClient routes REST calls through c (e.g. a proxy client).
+func (p *Provider) SetHTTPClient(c *http.Client) { p.client = c }
+
+func (p *Provider) addrPath(name string) string {
+	return fmt.Sprintf("/vpc/v1/projects/%s/externalAddresses/%s", p.cfg.ProjectID, name)
 }
 
 func (p *Provider) newReq(ctx context.Context, method, path string, body any) (*http.Request, error) {
@@ -78,57 +95,106 @@ func (p *Provider) newReq(ctx context.Context, method, path string, body any) (*
 	return req, nil
 }
 
-type ipResource struct {
-	ID        string `json:"id"`
-	IPID      string `json:"ip_id"`
-	IPAddress string `json:"ip_address"`
-	Address   string `json:"address"`
+// externalAddress mirrors the vpc/v1/externalAddress resource.
+type externalAddress struct {
+	Metadata struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Status struct {
+		Ready struct {
+			State   string `json:"state"`
+			Message string `json:"message"`
+		} `json:"ready"`
+		IPAddress string `json:"ipAddress"`
+	} `json:"status"`
 }
 
-// reserveResp tolerates either a flat object or one wrapped in {"ip": {...}}.
-type reserveResp struct {
-	IP *ipResource `json:"ip"`
-	ipResource
-}
-
-func (r reserveResp) resolve() (id, addr string) {
-	if r.IP != nil {
-		return firstNonEmpty(r.IP.ID, r.IP.IPID), firstNonEmpty(r.IP.IPAddress, r.IP.Address)
-	}
-	return firstNonEmpty(r.ID, r.IPID), firstNonEmpty(r.IPAddress, r.Address)
+// externalAddressName satisfies the API pattern ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$.
+func externalAddressName() string {
+	return fmt.Sprintf("roll-%d", time.Now().UnixNano())
 }
 
 func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
-	req, err := p.newReq(ctx, http.MethodPost, p.ipsPath(), map[string]any{})
+	name := externalAddressName()
+	body := map[string]any{
+		"kind":     "vpc/v1/externalAddress",
+		"metadata": map[string]any{"name": name},
+	}
+	req, err := p.newReq(ctx, http.MethodPost, p.addrPath(name)+"?createOnly=true", body)
 	if err != nil {
 		return provider.AllocatedIP{}, err
 	}
-	var resp reserveResp
-	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
+	var ea externalAddress
+	if err := provider.DoJSON(p.client, req, p.Name(), &ea); err != nil {
 		return provider.AllocatedIP{}, err
 	}
-	id, ipStr := resp.resolve()
+	// The delete path uses the NAME, so that (not metadata.id) is our resource id.
+	id := firstNonEmpty(ea.Metadata.Name, name)
+	ipStr := ea.Status.IPAddress
+	if ipStr == "" {
+		got, err := p.waitForIP(ctx, name)
+		if err != nil {
+			p.releaseQuietly(id)
+			return provider.AllocatedIP{}, err
+		}
+		ipStr = got
+	}
 	addr, err := netip.ParseAddr(ipStr)
 	if err != nil {
+		p.releaseQuietly(id)
 		return provider.AllocatedIP{}, fmt.Errorf("mws: некорректный ip %q: %w", ipStr, err)
 	}
 	return provider.AllocatedIP{Addr: addr, ID: id}, nil
 }
 
+// waitForIP polls GET until status.ipAddress is assigned.
+func (p *Provider) waitForIP(ctx context.Context, name string) (string, error) {
+	deadline := time.Now().Add(pollTimeout)
+	for {
+		req, err := p.newReq(ctx, http.MethodGet, p.addrPath(name), nil)
+		if err != nil {
+			return "", err
+		}
+		var ea externalAddress
+		if err := provider.DoJSON(p.client, req, p.Name(), &ea); err != nil {
+			return "", err
+		}
+		if ea.Status.IPAddress != "" {
+			return ea.Status.IPAddress, nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("mws: адрес %s не получил ip за %s (state %q)", name, pollTimeout, ea.Status.Ready.State)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 func (p *Provider) Release(ctx context.Context, ip provider.AllocatedIP) error {
-	req, err := p.newReq(ctx, http.MethodDelete, p.ipsPath()+"/"+ip.ID, nil)
+	req, err := p.newReq(ctx, http.MethodDelete, p.addrPath(ip.ID), nil)
 	if err != nil {
 		return err
 	}
 	return provider.DoJSON(p.client, req, p.Name(), nil)
 }
 
+func (p *Provider) releaseQuietly(id string) {
+	if id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_ = p.Release(ctx, provider.AllocatedIP{ID: id})
+}
+
 func (p *Provider) Attach(ctx context.Context, ip provider.AllocatedIP, vmID string) error {
-	// Binding a reserved IP to a VM happens at VM-create time or by attaching to
-	// a network interface — not a single standalone endpoint in the public API.
 	return &provider.NotImplementedError{
 		Provider: p.Name(),
-		Detail:   "привязка IP — при создании ВМ или к сетевому интерфейсу; задайте ip_address вручную",
+		Detail:   "привязка внешнего IP — при создании ВМ или к сетевому интерфейсу инстанса",
 	}
 }
 
@@ -140,9 +206,6 @@ func firstNonEmpty(vals ...string) string {
 	}
 	return ""
 }
-
-// SetHTTPClient routes REST calls through c (e.g. a proxy client).
-func (p *Provider) SetHTTPClient(c *http.Client) { p.client = c }
 
 var (
 	_ provider.Provider         = (*Provider)(nil)
