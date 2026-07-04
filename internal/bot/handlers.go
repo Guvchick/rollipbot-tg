@@ -945,7 +945,14 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 	}
 
 	var lastEdit time.Time
+	var rolled []string // every address seen this run, for the forum topic
 	onAttempt := func(n int, ip string, matched bool) {
+		tag := "❌"
+		if matched {
+			tag = "✅"
+		}
+		rolled = append(rolled, fmt.Sprintf("%s %s", tag, ip))
+
 		now := time.Now()
 		if !matched && now.Sub(lastEdit) < 450*time.Millisecond {
 			return // throttle edits
@@ -964,10 +971,14 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 		h.edit(ctx, b, chatID, msgID, h.rollErrText(display, err), nil)
 		h.fsm.Clear(chatID)
 		// log to the forum group
-		if errors.Is(err, engine.ErrBudgetExhausted) {
-			h.notifier.NoMatch(ctx, b, display, mask, budget)
-		} else {
-			h.notifier.Failed(ctx, b, display, err.Error())
+		var q *provider.QuotaError
+		switch {
+		case errors.As(err, &q):
+			h.notifier.QuotaExceeded(ctx, b, display, q.AvailableAt, rolled)
+		case errors.Is(err, engine.ErrBudgetExhausted):
+			h.notifier.NoMatch(ctx, b, display, mask, budget, rolled)
+		default:
+			h.notifier.Failed(ctx, b, display, err.Error(), rolled)
 		}
 		return
 	}
@@ -990,7 +1001,7 @@ func (h *Handler) runRoll(b *bot.Bot, chatID int64, msgID int, provKey, mask str
 	})
 	h.edit(ctx, b, chatID, msgID, fmt.Sprintf("✅ Готово!\nАккаунт: %s\nАдрес: %s\nСовпал за %d попыт.\nID ресурса: %s",
 		display, res.IP.Addr.String(), res.Attempts, res.IP.ID), resultKeyboard(id))
-	h.notifier.Caught(ctx, b, display, res.IP.Addr.String(), mask, res.Attempts)
+	h.notifier.Caught(ctx, b, display, res.IP.Addr.String(), mask, res.Attempts, rolled)
 }
 
 func (h *Handler) doAttach(ctx context.Context, b *bot.Bot, chatID int64, pool storage.PoolIP, vmID string) {
@@ -1029,14 +1040,29 @@ func (h *Handler) confirmText(st *dialogState, acc *provider.Account) string {
 	if caps.DailyCap > 0 {
 		daily = fmt.Sprintf("осталось сегодня: %d", h.engine.DailyRemaining(acc.Key(), caps.DailyCap))
 	}
+	cooldown := ""
+	if until, ok := h.engine.Cooldown(acc.Key()); ok {
+		cooldown = fmt.Sprintf("\n⛔ Квота исчерпана — ролл будет доступен с %s", until.Local().Format("02.01.2006 15:04 MST"))
+	}
 	return fmt.Sprintf(
-		"4/4 — подтверждение:\nАккаунт: %s\nМаска: %s\nПопыток: %d\nЦена за ролл: %s\n%s\n\nЗапускаем?",
-		accountDisplay(acc), st.Mask, st.Budget, cost, daily,
+		"4/4 — подтверждение:\nАккаунт: %s\nМаска: %s\nПопыток: %d\nЦена за ролл: %s\n%s%s\n\nЗапускаем?",
+		accountDisplay(acc), st.Mask, st.Budget, cost, daily, cooldown,
 	)
 }
 
 func (h *Handler) rollErrText(display string, err error) string {
+	var quota *provider.QuotaError
 	switch {
+	case errors.As(err, &quota):
+		when := "через ~24 часа"
+		if !quota.AvailableAt.IsZero() {
+			when = quota.AvailableAt.Local().Format("02.01.2006 15:04 MST")
+		}
+		lim := ""
+		if quota.Limit > 0 {
+			lim = fmt.Sprintf(" (лимит %d/сутки)", quota.Limit)
+		}
+		return fmt.Sprintf("⛔ %s: дневная квота исчерпана%s.\nСледующий ролл возможен: %s", display, lim, when)
 	case errors.Is(err, engine.ErrBudgetExhausted):
 		return fmt.Sprintf("🚫 %s: совпадений нет — исчерпан лимит попыток. Увеличь budget или ослабь маску.", display)
 	case errors.Is(err, engine.ErrDailyCap):

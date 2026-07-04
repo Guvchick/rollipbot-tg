@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -57,6 +58,7 @@ type ProviderConfig struct {
 	MaxRollsPerRun int      `yaml:"max_rolls_per_run"`
 	DailyCap       int      `yaml:"daily_cap"`
 	RateLimitRPS   float64  `yaml:"rate_limit_rps"`
+	RollDelayMS    int      `yaml:"roll_delay_ms"` // pause between rolls, milliseconds
 	CostPerRoll    string   `yaml:"cost_per_roll"`
 	Masks          []string `yaml:"masks"`
 
@@ -99,6 +101,7 @@ func (c *ProviderConfig) Caps() provider.RollCaps {
 		MaxRollsPerRun: c.MaxRollsPerRun,
 		DailyCap:       c.DailyCap,
 		RateLimitRPS:   c.RateLimitRPS,
+		RollDelay:      time.Duration(c.RollDelayMS) * time.Millisecond,
 		CostPerRoll:    c.CostPerRoll,
 		Strategy:       c.Strategy,
 	}

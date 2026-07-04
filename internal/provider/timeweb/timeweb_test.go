@@ -186,6 +186,32 @@ func TestAccountAsCleaner(t *testing.T) {
 	}
 }
 
+// A 403 daily_limit_exceeded must surface as a typed QuotaError carrying the
+// resume date, so the engine can pause the account instead of retrying.
+func TestAllocateDailyLimitBecomesQuotaError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"status_code":403,"error_code":"daily_limit_exceeded","message":"Daily limit exceeded","details":{"limit":10,"available_date_for_creation":"2026-07-04T20:29:10.000Z"},"response_id":"9df8a0a0"}`))
+	}))
+	defer srv.Close()
+
+	p := New("tok", "", provider.RollCaps{})
+	p.base = srv.URL
+
+	_, err := p.Allocate(context.Background())
+	var q *provider.QuotaError
+	if !errors.As(err, &q) {
+		t.Fatalf("err = %v, want *provider.QuotaError", err)
+	}
+	if q.Limit != 10 {
+		t.Errorf("limit = %d, want 10", q.Limit)
+	}
+	want, _ := time.Parse(time.RFC3339, "2026-07-04T20:29:10Z")
+	if !q.AvailableAt.Equal(want) {
+		t.Errorf("availableAt = %v, want %v", q.AvailableAt, want)
+	}
+}
+
 func TestAllocateAPIErrorRetryable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limited", http.StatusTooManyRequests)

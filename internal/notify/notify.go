@@ -10,10 +10,15 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
+
+// maxRolledLines caps how many rolled addresses we list in one message so we
+// stay under Telegram's 4096-char limit even on long runs.
+const maxRolledLines = 40
 
 // TopicStore persists name → message_thread_id so topics survive restarts.
 type TopicStore interface {
@@ -45,18 +50,18 @@ func New(chatID int64, enabled bool, store TopicStore, log *slog.Logger) *Notifi
 // Enabled reports whether notifications are configured.
 func (n *Notifier) Enabled() bool { return n != nil && n.enabled }
 
-// Caught logs a successful match.
-func (n *Notifier) Caught(ctx context.Context, b *bot.Bot, account, ip, mask string, attempts int) {
+// Caught logs a successful match, listing every address rolled on the way.
+func (n *Notifier) Caught(ctx context.Context, b *bot.Bot, account, ip, mask string, attempts int, rolled []string) {
 	n.post(ctx, b, account, fmt.Sprintf(
-		"🎯 <b>Поймал IP</b>\nАккаунт: %s\nIP: <code>%s</code>\nМаска: %s\nПопыток: %d",
-		esc(account), esc(ip), esc(mask), attempts))
+		"🎯 <b>Поймал IP</b>\nАккаунт: %s\nIP: <code>%s</code>\nМаска: %s\nПопыток: %d%s",
+		esc(account), esc(ip), esc(mask), attempts, rolledBlock(rolled)))
 }
 
 // NoMatch logs a run that exhausted its budget without a match.
-func (n *Notifier) NoMatch(ctx context.Context, b *bot.Bot, account, mask string, attempts int) {
+func (n *Notifier) NoMatch(ctx context.Context, b *bot.Bot, account, mask string, attempts int, rolled []string) {
 	n.post(ctx, b, account, fmt.Sprintf(
-		"🟡 <b>Без совпадений</b>\nАккаунт: %s\nМаска: %s\nПопыток: %d",
-		esc(account), esc(mask), attempts))
+		"🟡 <b>Без совпадений</b>\nАккаунт: %s\nМаска: %s\nПопыток: %d%s",
+		esc(account), esc(mask), attempts, rolledBlock(rolled)))
 }
 
 // Attached logs binding an address to a VM.
@@ -67,9 +72,45 @@ func (n *Notifier) Attached(ctx context.Context, b *bot.Bot, account, ip, vm str
 }
 
 // Failed logs a run error.
-func (n *Notifier) Failed(ctx context.Context, b *bot.Bot, account, reason string) {
+func (n *Notifier) Failed(ctx context.Context, b *bot.Bot, account, reason string, rolled []string) {
 	n.post(ctx, b, account, fmt.Sprintf(
-		"⚠️ <b>Ошибка прогона</b>\nАккаунт: %s\n%s", esc(account), esc(reason)))
+		"⚠️ <b>Ошибка прогона</b>\nАккаунт: %s\n%s%s", esc(account), esc(reason), rolledBlock(rolled)))
+}
+
+// QuotaExceeded logs that the account hit its daily creation quota and when it
+// may roll again.
+func (n *Notifier) QuotaExceeded(ctx context.Context, b *bot.Bot, account string, availableAt time.Time, rolled []string) {
+	when := "через ~24 часа"
+	if !availableAt.IsZero() {
+		when = availableAt.Local().Format("02.01.2006 15:04 MST")
+	}
+	n.post(ctx, b, account, fmt.Sprintf(
+		"⛔ <b>Квота исчерпана</b>\nАккаунт: %s\nСледующий ролл возможен: %s%s",
+		esc(account), esc(when), rolledBlock(rolled)))
+}
+
+// rolledBlock renders the rolled addresses as an expandable blockquote, capping
+// the list so the message stays within Telegram limits.
+func rolledBlock(rolled []string) string {
+	if len(rolled) == 0 {
+		return ""
+	}
+	shown := rolled
+	extra := 0
+	if len(shown) > maxRolledLines {
+		extra = len(shown) - maxRolledLines
+		shown = shown[len(shown)-maxRolledLines:]
+	}
+	var sb strings.Builder
+	sb.WriteString("\n<blockquote expandable>Роллы:\n")
+	if extra > 0 {
+		fmt.Fprintf(&sb, "…(ещё %d выше)\n", extra)
+	}
+	for _, r := range shown {
+		sb.WriteString(esc(r) + "\n")
+	}
+	sb.WriteString("</blockquote>")
+	return sb.String()
 }
 
 func (n *Notifier) post(ctx context.Context, b *bot.Bot, topic, text string) {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,7 +108,7 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 	}
 	var resp ipResp
 	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
-		return provider.AllocatedIP{}, err
+		return provider.AllocatedIP{}, p.mapErr(err)
 	}
 	fip := resp.IP
 	if fip.ID == "" {
@@ -155,6 +156,31 @@ func (p *Provider) waitForIP(ctx context.Context, id string) (string, error) {
 		case <-time.After(p.pollInterval):
 		}
 	}
+}
+
+// mapErr converts Timeweb's 403 "daily_limit_exceeded" body into a typed
+// provider.QuotaError (carrying the resume date) so the engine can pause the
+// account instead of retrying. Other errors pass through unchanged.
+func (p *Provider) mapErr(err error) error {
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		return err
+	}
+	var body struct {
+		ErrorCode string `json:"error_code"`
+		Details   struct {
+			Limit                    int    `json:"limit"`
+			AvailableDateForCreation string `json:"available_date_for_creation"`
+		} `json:"details"`
+	}
+	if json.Unmarshal([]byte(apiErr.Body), &body) != nil || body.ErrorCode != "daily_limit_exceeded" {
+		return err
+	}
+	q := &provider.QuotaError{Provider: p.Name(), Limit: body.Details.Limit}
+	if t, e := time.Parse(time.RFC3339, body.Details.AvailableDateForCreation); e == nil {
+		q.AvailableAt = t
+	}
+	return q
 }
 
 // releaseQuietly deletes a floating IP best-effort, on a fresh short context so

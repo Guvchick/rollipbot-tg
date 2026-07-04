@@ -31,20 +31,43 @@ type Result struct {
 
 // Engine drives the allocate→match→release loop for any Provider.
 type Engine struct {
-	mu       sync.Mutex
-	limiters map[string]*rate.Limiter
-	daily    *dailyCounter
-	store    storage.Storage
-	log      *slog.Logger
+	mu        sync.Mutex
+	limiters  map[string]*rate.Limiter
+	cooldowns map[string]time.Time // account name → don't roll until (quota)
+	daily     *dailyCounter
+	store     storage.Storage
+	log       *slog.Logger
 }
 
 func New(store storage.Storage, log *slog.Logger) *Engine {
 	return &Engine{
-		limiters: make(map[string]*rate.Limiter),
-		daily:    newDailyCounter(store, log),
-		store:    store,
-		log:      log,
+		limiters:  make(map[string]*rate.Limiter),
+		cooldowns: make(map[string]time.Time),
+		daily:     newDailyCounter(store, log),
+		store:     store,
+		log:       log,
 	}
+}
+
+// Cooldown returns when an account may roll again after a quota block, if any.
+func (e *Engine) Cooldown(name string) (time.Time, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	t, ok := e.cooldowns[name]
+	if !ok {
+		return time.Time{}, false
+	}
+	if time.Now().After(t) {
+		delete(e.cooldowns, name)
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (e *Engine) setCooldown(name string, until time.Time) {
+	e.mu.Lock()
+	e.cooldowns[name] = until
+	e.mu.Unlock()
 }
 
 func (e *Engine) limiter(name string, rps float64) *rate.Limiter {
@@ -77,14 +100,20 @@ func (e *Engine) Roll(
 	onAttempt func(n int, ip string, matched bool),
 ) (Result, error) {
 
+	name := p.Name()
+	// Pre-blocked by an earlier quota hit — don't waste an API call.
+	if until, ok := e.Cooldown(name); ok {
+		return Result{}, &provider.QuotaError{Provider: name, AvailableAt: until}
+	}
+
 	caps := p.Caps()
 	if caps.MaxRollsPerRun > 0 && budget > caps.MaxRollsPerRun {
 		budget = caps.MaxRollsPerRun
 	}
-	lim := e.limiter(p.Name(), caps.RateLimitRPS)
+	lim := e.limiter(name, caps.RateLimitRPS)
 
 	for i := 1; i <= budget; i++ {
-		if !e.daily.Allow(p.Name(), caps.DailyCap) {
+		if !e.daily.Allow(name, caps.DailyCap) {
 			return Result{}, ErrDailyCap
 		}
 		if err := lim.Wait(ctx); err != nil {
@@ -93,20 +122,30 @@ func (e *Engine) Roll(
 
 		ip, err := p.Allocate(ctx)
 		if err != nil {
+			// Provider daily quota exhausted → stop and remember the resume time.
+			var q *provider.QuotaError
+			if errors.As(err, &q) {
+				until := q.AvailableAt
+				if until.IsZero() {
+					until = time.Now().Add(24 * time.Hour)
+				}
+				e.setCooldown(name, until)
+				return Result{}, err
+			}
 			// 429 / transient → exponential backoff and keep going.
 			if e.backoff(ctx, i, err) {
 				continue
 			}
 			return Result{}, err
 		}
-		e.daily.Inc(p.Name())
+		e.daily.Inc(name)
 
 		matched := mask.Match(ip.Addr)
 		if onAttempt != nil {
 			onAttempt(i, ip.Addr.String(), matched)
 		}
 		_ = e.store.LogRoll(ctx, storage.RollLogEntry{
-			Provider: p.Name(),
+			Provider: name,
 			IP:       ip.Addr.String(),
 			Matched:  matched,
 			Released: !matched,
@@ -118,13 +157,23 @@ func (e *Engine) Roll(
 
 		// Did not match → release it (otherwise it keeps billing).
 		if err := p.Release(ctx, ip); err != nil {
-			e.log.Warn("release failed", "provider", p.Name(), "ip", ip.Addr.String(), "err", err)
+			e.log.Warn("release failed", "provider", name, "ip", ip.Addr.String(), "err", err)
 		}
 
-		// Jitter so create/delete bursts don't look like abuse to anti-fraud.
-		sleep(ctx, time.Duration(200+rand.Intn(400))*time.Millisecond)
+		// Delay between rolls (configured, else jitter) so bursts don't look
+		// like abuse to anti-fraud and to pace against provider limits.
+		sleep(ctx, rollDelay(caps.RollDelay))
 	}
 	return Result{}, ErrBudgetExhausted
+}
+
+// rollDelay returns the pause between two rolls: the configured delay plus a bit
+// of jitter, or a default random jitter when none is configured.
+func rollDelay(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return time.Duration(200+rand.Intn(400)) * time.Millisecond
+	}
+	return configured + time.Duration(rand.Intn(300))*time.Millisecond
 }
 
 // backoff waits (with jitter) on retryable provider errors and reports whether

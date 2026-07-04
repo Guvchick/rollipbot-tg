@@ -40,6 +40,7 @@ providers:
     max_rolls_per_run: 10
     daily_cap: 10               # Timeweb: ≤10 новых IPv4/сутки на сервер
     rate_limit_rps: 15          # держим ниже 20/s
+    roll_delay_ms: 1500         # пауза между роллами (мс); 0 = стандартный джиттер
     cost_per_roll: "~150₽/мес пока IP не удалён"
     masks: ["185.12.0.0/16", "95.142.*.*"]
 

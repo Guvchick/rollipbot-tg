@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"time"
 )
 
 // AllocatedIP is a freshly allocated public/floating address.
@@ -60,11 +61,29 @@ func (a *Account) AsCleaner() (Cleaner, bool) {
 
 // RollCaps describes how many and how often an account may be rolled.
 type RollCaps struct {
-	MaxRollsPerRun int     // hard cap on attempts per single run
-	DailyCap       int     // max new IPs per day (0 = no daily limit, quota only)
-	RateLimitRPS   float64 // requests per second to the API
-	CostPerRoll    string  // informational, to warn the user
-	Strategy       string  // "floating" | "recreate" | "additional_ip" | ...
+	MaxRollsPerRun int           // hard cap on attempts per single run
+	DailyCap       int           // max new IPs per day (0 = no daily limit, quota only)
+	RateLimitRPS   float64       // requests per second to the API
+	RollDelay      time.Duration // pause between consecutive rolls (0 = default jitter)
+	CostPerRoll    string        // informational, to warn the user
+	Strategy       string        // "floating" | "recreate" | "additional_ip" | ...
+}
+
+// QuotaError means the provider refused to allocate because a usage quota
+// (usually a daily creation limit) is exhausted. AvailableAt, when set, is when
+// allocation may resume; Limit is the provider's cap when known.
+type QuotaError struct {
+	Provider    string
+	Limit       int
+	AvailableAt time.Time
+}
+
+func (e *QuotaError) Error() string {
+	if !e.AvailableAt.IsZero() {
+		return fmt.Sprintf("%s: дневная квота исчерпана (лимит %d), снова с %s",
+			e.Provider, e.Limit, e.AvailableAt.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("%s: дневная квота исчерпана (лимит %d)", e.Provider, e.Limit)
 }
 
 // Account wraps a concrete adapter as one credentialed account. Several accounts

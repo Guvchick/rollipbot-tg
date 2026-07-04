@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"ip-roller-bot/internal/provider"
 	"ip-roller-bot/internal/storage"
@@ -22,7 +23,8 @@ type fakeProv struct {
 	mu       sync.Mutex
 	i        int
 	released []string
-	failN    int // first failN Allocate calls return a retryable 429
+	failN    int                  // first failN Allocate calls return a retryable 429
+	quota    *provider.QuotaError // when set, Allocate returns it immediately
 }
 
 func (f *fakeProv) Name() string                                               { return "fake" }
@@ -32,6 +34,9 @@ func (f *fakeProv) Attach(context.Context, provider.AllocatedIP, string) error {
 func (f *fakeProv) Allocate(context.Context) (provider.AllocatedIP, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.quota != nil {
+		return provider.AllocatedIP{}, f.quota
+	}
 	if f.failN > 0 {
 		f.failN--
 		return provider.AllocatedIP{}, &provider.APIError{Provider: "fake", StatusCode: 429}
@@ -122,6 +127,41 @@ func TestRollBackoffRetries(t *testing.T) {
 	}
 	if res.IP.Addr.String() != "10.0.0.5" {
 		t.Errorf("matched ip = %s, want 10.0.0.5", res.IP.Addr)
+	}
+}
+
+func TestRollQuotaStopsAndSetsCooldown(t *testing.T) {
+	e := newTestEngine(t)
+	until := time.Now().Add(24 * time.Hour)
+	p := &fakeProv{
+		caps:  provider.RollCaps{RateLimitRPS: 1000},
+		addrs: []string{"10.0.0.1", "10.0.0.2"},
+		quota: &provider.QuotaError{Provider: "fake", Limit: 10, AvailableAt: until},
+	}
+	m, _ := ParseMask("10.0.0.0/8")
+
+	// First run hits the quota on the very first allocate and stops.
+	_, err := e.Roll(context.Background(), p, m, 10, nil)
+	var q *provider.QuotaError
+	if !errors.As(err, &q) {
+		t.Fatalf("err = %v, want *provider.QuotaError", err)
+	}
+	if p.i != 0 {
+		t.Errorf("no address should be consumed on quota, i=%d", p.i)
+	}
+	if at, ok := e.Cooldown("fake"); !ok || !at.Equal(until) {
+		t.Errorf("cooldown = %v (%v), want %v", at, ok, until)
+	}
+
+	// While in cooldown, a second run returns the quota error without calling
+	// Allocate at all (clear the scripted quota to prove the pre-check fires).
+	p.quota = nil
+	_, err = e.Roll(context.Background(), p, m, 10, nil)
+	if !errors.As(err, &q) {
+		t.Fatalf("cooldown run err = %v, want *provider.QuotaError", err)
+	}
+	if p.i != 0 {
+		t.Errorf("cooldown must skip Allocate entirely, i=%d", p.i)
 	}
 }
 

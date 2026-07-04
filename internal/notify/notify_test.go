@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
+	"time"
 )
 
 type fakeStore struct {
@@ -31,10 +33,30 @@ func TestDisabledIsNoop(t *testing.T) {
 		t.Fatal("notifier with chat_id 0 must be disabled")
 	}
 	// must not panic / touch the (nil) bot when disabled
-	n.Caught(context.Background(), nil, "acc", "1.2.3.4", "1.2.3.*", 3)
-	n.NoMatch(context.Background(), nil, "acc", "1.2.3.*", 5)
+	rolled := []string{"❌ 1.2.3.5", "✅ 1.2.3.4"}
+	n.Caught(context.Background(), nil, "acc", "1.2.3.4", "1.2.3.*", 3, rolled)
+	n.NoMatch(context.Background(), nil, "acc", "1.2.3.*", 5, rolled)
 	n.Attached(context.Background(), nil, "acc", "1.2.3.4", "vm1")
-	n.Failed(context.Background(), nil, "acc", "boom")
+	n.Failed(context.Background(), nil, "acc", "boom", rolled)
+	n.QuotaExceeded(context.Background(), nil, "acc", time.Time{}, rolled)
+}
+
+func TestRolledBlock(t *testing.T) {
+	if got := rolledBlock(nil); got != "" {
+		t.Errorf("empty rolled should render nothing, got %q", got)
+	}
+	// long list is capped and notes the overflow
+	many := make([]string, maxRolledLines+10)
+	for i := range many {
+		many[i] = "❌ x"
+	}
+	block := rolledBlock(many)
+	if !strings.Contains(block, "ещё 10 выше") {
+		t.Errorf("expected overflow note, got %q", block)
+	}
+	if strings.Count(block, "\n") > maxRolledLines+5 {
+		t.Errorf("rolled block not capped: %q", block)
+	}
 }
 
 func TestEnsureTopicPrefersStore(t *testing.T) {
