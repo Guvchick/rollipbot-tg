@@ -36,6 +36,28 @@ type Provider interface {
 	Caps() RollCaps
 }
 
+// UnusedIP is a provider-side floating/public address that is reserved but not
+// bound to any resource — a candidate for automatic cleanup.
+type UnusedIP struct {
+	Addr netip.Addr
+	ID   string
+}
+
+// Cleaner is an optional capability. Providers that can enumerate their own
+// unbound addresses implement it, so the bot can purge floating IPs that leaked
+// (e.g. from an interrupted roll) and aren't attached to any service. Callers
+// delete each returned IP via Release, skipping any they want to keep.
+type Cleaner interface {
+	// ListUnused returns addresses not bound to any resource.
+	ListUnused(ctx context.Context) ([]UnusedIP, error)
+}
+
+// AsCleaner reports whether the account's adapter supports cleanup.
+func (a *Account) AsCleaner() (Cleaner, bool) {
+	c, ok := a.Provider.(Cleaner)
+	return c, ok
+}
+
 // RollCaps describes how many and how often an account may be rolled.
 type RollCaps struct {
 	MaxRollsPerRun int     // hard cap on attempts per single run

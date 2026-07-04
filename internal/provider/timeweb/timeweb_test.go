@@ -24,7 +24,7 @@ func TestAllocateReleaseAttach(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/floating-ips":
 			allocBody = true
-			_, _ = w.Write([]byte(`{"floating_ip":{"id":"fip-1","ip":"185.12.7.9"}}`))
+			_, _ = w.Write([]byte(`{"ip":{"id":"fip-1","ip":"185.12.7.9"}}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/floating-ips/fip-1":
 			delPath = r.URL.Path
 			w.WriteHeader(http.StatusNoContent)
@@ -77,15 +77,15 @@ func TestAllocatePollsForAsyncIP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/floating-ips":
-			// created, but no address yet
-			_, _ = w.Write([]byte(`{"floating_ip":{"id":"fip-9","ip":"","status":"in_process"}}`))
+			// created, but no address yet (Timeweb returns ip: null)
+			_, _ = w.Write([]byte(`{"ip":{"id":"fip-9","ip":null}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/floating-ips/fip-9":
 			// address appears only on the third poll
 			if atomic.AddInt32(&gets, 1) < 3 {
-				_, _ = w.Write([]byte(`{"floating_ip":{"id":"fip-9","ip":"","status":"in_process"}}`))
+				_, _ = w.Write([]byte(`{"ip":{"id":"fip-9","ip":null}}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"floating_ip":{"id":"fip-9","ip":"185.12.7.42","status":"created"}}`))
+			_, _ = w.Write([]byte(`{"ip":{"id":"fip-9","ip":"185.12.7.42"}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -119,7 +119,7 @@ func TestAllocatePollTimeout(t *testing.T) {
 			atomic.StoreInt32(&deleted, 1)
 			w.WriteHeader(http.StatusNoContent)
 		default: // POST create and GET poll both return no address
-			_, _ = w.Write([]byte(`{"floating_ip":{"id":"fip-x","ip":"","status":"in_process"}}`))
+			_, _ = w.Write([]byte(`{"ip":{"id":"fip-x","ip":null}}`))
 		}
 	}))
 	defer srv.Close()
@@ -135,6 +135,54 @@ func TestAllocatePollTimeout(t *testing.T) {
 	// the orphaned, unaddressed IP must be cleaned up so it doesn't keep billing
 	if atomic.LoadInt32(&deleted) != 1 {
 		t.Error("orphaned floating ip was not released after poll timeout")
+	}
+}
+
+// ListUnused must return only floating IPs not bound to a resource (and skip
+// ones still without an address).
+func TestListUnused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/floating-ips" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"meta":{"total":4},"ips":[
+			{"id":"free-1","ip":"1.1.1.1","resource_id":null,"resource_type":null},
+			{"id":"bound-1","ip":"2.2.2.2","resource_id":123,"resource_type":"server"},
+			{"id":"free-2","ip":"3.3.3.3","resource_id":null,"resource_type":null},
+			{"id":"pending","ip":null,"resource_id":null,"resource_type":null}
+		]}`))
+	}))
+	defer srv.Close()
+
+	p := New("tok", "", provider.RollCaps{})
+	p.base = srv.URL
+
+	unused, err := p.ListUnused(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, u := range unused {
+		got[u.ID] = u.Addr.String()
+	}
+	if len(got) != 2 || got["free-1"] != "1.1.1.1" || got["free-2"] != "3.3.3.3" {
+		t.Fatalf("ListUnused = %v, want free-1 and free-2 only", got)
+	}
+	if _, ok := got["bound-1"]; ok {
+		t.Error("bound IP must not be reported as unused")
+	}
+	if _, ok := got["pending"]; ok {
+		t.Error("address-less IP must be skipped")
+	}
+}
+
+// The bot reaches ListUnused through the Account wrapper's embedded provider, so
+// the capability assertion must survive that indirection.
+func TestAccountAsCleaner(t *testing.T) {
+	acc := provider.NewAccount(New("tok", "", provider.RollCaps{}), "timeweb", "tw1", 1)
+	if _, ok := acc.AsCleaner(); !ok {
+		t.Error("timeweb account should expose the Cleaner capability")
 	}
 }
 

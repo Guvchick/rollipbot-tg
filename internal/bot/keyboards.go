@@ -67,9 +67,25 @@ func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
 	}
 	rows = append(rows,
 		[]models.InlineKeyboardButton{{Text: "➕ Добавить аккаунт", CallbackData: "acc:add"}},
+		[]models.InlineKeyboardButton{{Text: "🧹 Очистить неиспользуемые IP", CallbackData: "acc:cleanup"}},
 		backToMenuRow(),
 	)
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// accountsBackKeyboard is a single "back to accounts" row.
+func accountsBackKeyboard() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}},
+	}}
+}
+
+// cleanupConfirmKeyboard gates the destructive delete behind an explicit tap.
+func cleanupConfirmKeyboard(n int) *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: fmt.Sprintf("🗑 Удалить %d", n), CallbackData: "acc:cleanupgo"}},
+		{{Text: "⬅️ Отмена", CallbackData: "acc:list"}},
+	}}
 }
 
 // addTypeKeyboard lists provider types for the first step of the add wizard.

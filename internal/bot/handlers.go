@@ -687,6 +687,12 @@ func (h *Handler) cbAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.fsm.Clear(chatID)
 		h.editAccountsMenu(ctx, b, chatID, msgID)
 		return
+	case data == "cleanup":
+		h.cbCleanup(ctx, b, chatID, msgID)
+		return
+	case data == "cleanupgo":
+		h.cbCleanupRun(ctx, b, chatID, msgID)
+		return
 	case data == "addhelp": // legacy: text /addaccount help
 		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
 		return

@@ -51,14 +51,30 @@ func New(token, zone string, caps provider.RollCaps) *Provider {
 func (p *Provider) Name() string            { return "timeweb" }
 func (p *Provider) Caps() provider.RollCaps { return p.caps }
 
+// floatingIP mirrors the Timeweb FloatingIp model. `ip` is nullable (empty
+// while the address is still being provisioned); `resource_id`/`resource_type`
+// are null until the IP is bound to a server.
 type floatingIP struct {
-	ID     string `json:"id"`
-	IP     string `json:"ip"`
-	Status string `json:"status"`
+	ID           string   `json:"id"`
+	IP           string   `json:"ip"`
+	ResourceID   *float64 `json:"resource_id"`
+	ResourceType *string  `json:"resource_type"`
 }
 
-type createResp struct {
-	FloatingIP floatingIP `json:"floating_ip"`
+// bound reports whether the floating IP is attached to a resource.
+func (f floatingIP) bound() bool {
+	return f.ResourceID != nil || (f.ResourceType != nil && *f.ResourceType != "")
+}
+
+// ipResp wraps a single floating IP: {"ip": {...}} — used by both create and
+// GET-by-id. Note the outer key is "ip" and the address is the inner "ip".
+type ipResp struct {
+	IP floatingIP `json:"ip"`
+}
+
+// listResp wraps the list endpoint: {"ips": [...]}.
+type listResp struct {
+	IPs []floatingIP `json:"ips"`
 }
 
 func (p *Provider) newReq(ctx context.Context, method, path string, body any) (*http.Request, error) {
@@ -89,11 +105,11 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 	if err != nil {
 		return provider.AllocatedIP{}, err
 	}
-	var resp createResp
+	var resp ipResp
 	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
 		return provider.AllocatedIP{}, err
 	}
-	fip := resp.FloatingIP
+	fip := resp.IP
 	if fip.ID == "" {
 		return provider.AllocatedIP{}, fmt.Errorf("timeweb: пустой id в ответе создания floating ip")
 	}
@@ -123,15 +139,15 @@ func (p *Provider) waitForIP(ctx context.Context, id string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		var resp createResp
+		var resp ipResp
 		if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
 			return "", err
 		}
-		if ip := resp.FloatingIP.IP; ip != "" {
+		if ip := resp.IP.IP; ip != "" {
 			return ip, nil
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeweb: floating ip %s не получил адрес за %s (статус %q)", id, p.pollTimeout, resp.FloatingIP.Status)
+			return "", fmt.Errorf("timeweb: floating ip %s не получил адрес за %s", id, p.pollTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -171,4 +187,32 @@ func (p *Provider) Attach(ctx context.Context, ip provider.AllocatedIP, vmID str
 	return provider.DoJSON(p.client, req, p.Name(), nil)
 }
 
-var _ provider.Provider = (*Provider)(nil)
+// ListUnused returns floating IPs not bound to any resource — leaked/orphaned
+// addresses that keep billing. The caller decides which to delete.
+func (p *Provider) ListUnused(ctx context.Context) ([]provider.UnusedIP, error) {
+	req, err := p.newReq(ctx, http.MethodGet, "/floating-ips?limit=1000", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp listResp
+	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
+		return nil, err
+	}
+	var out []provider.UnusedIP
+	for _, f := range resp.IPs {
+		if f.bound() || f.IP == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(f.IP)
+		if err != nil {
+			continue // skip anything without a parseable address
+		}
+		out = append(out, provider.UnusedIP{Addr: addr, ID: f.ID})
+	}
+	return out, nil
+}
+
+var (
+	_ provider.Provider = (*Provider)(nil)
+	_ provider.Cleaner  = (*Provider)(nil)
+)
