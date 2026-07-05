@@ -10,6 +10,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"ip-roller-bot/internal/provider/mws"
 	"ip-roller-bot/internal/registry"
 	"ip-roller-bot/internal/storage"
 )
@@ -46,7 +47,7 @@ func (h *Handler) cbAddType(ctx context.Context, b *bot.Bot, u *models.Update) {
 			Step:      stepAddField,
 			MsgID:     msgID,
 			AddType:   typ,
-			AddFields: registry.Fields(typ),
+			AddFields: registry.WizardFields(typ),
 			AddIdx:    0,
 			AddCreds:  map[string]string{},
 		}
@@ -58,6 +59,15 @@ func (h *Handler) cbAddType(ctx context.Context, b *bot.Bot, u *models.Update) {
 // field, or moves on to the (optional) label step once all fields are done.
 func (h *Handler) promptAddField(ctx context.Context, b *bot.Bot, chatID int64, msgID int) {
 	st := h.fsm.Get(chatID)
+	// Fields may have been autofilled (mws: pasted resource path / key JSON).
+	idx := st.AddIdx
+	for idx < len(st.AddFields) && st.AddCreds[st.AddFields[idx].Name] != "" {
+		idx++
+	}
+	if idx != st.AddIdx {
+		h.fsm.Update(chatID, func(s *dialogState) { s.AddIdx = idx })
+		st = h.fsm.Get(chatID)
+	}
 	if st.AddIdx >= len(st.AddFields) {
 		h.promptAddLabel(ctx, b, chatID, msgID)
 		return
@@ -103,6 +113,10 @@ func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 		h.send(ctx, b, chatID, "Пустое значение. Пришли ещё раз или нажми «Пропустить» (если поле необязательное).")
 		return
 	}
+	// mws: паста ресурсного пути или скачанного JSON раскладывается на поля сама.
+	if st.AddType == "mws" && h.mwsAutofill(ctx, b, chatID, userMsgID, f, value) {
+		return
+	}
 	if st.AddType == "gcore" && f.Name == "region_id" {
 		if _, err := strconv.Atoi(value); err != nil {
 			h.send(ctx, b, chatID, "region_id должно быть числом (напр. 7). Пришли ещё раз.")
@@ -122,6 +136,62 @@ func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 		s.AddIdx++
 	})
 	h.promptAddField(ctx, b, chatID, st.MsgID)
+}
+
+// mwsAutofill handles "вставил одну штуку — заполнилось всё" for mws: the
+// downloaded authorized-key JSON or a resource path (iam/projects/…/
+// serviceAccounts/…/authorizedKeys/… or a console URL) fills several fields at
+// once; promptAddField then skips the filled steps. Returns true when the
+// value was consumed (fields filled or a retry was requested).
+func (h *Handler) mwsAutofill(ctx context.Context, b *bot.Bot, chatID int64, userMsgID int, f registry.Field, value string) bool {
+	st := h.fsm.Get(chatID)
+	deleteMsg := func() {
+		if userMsgID == 0 {
+			return
+		}
+		if _, err := b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: userMsgID}); err != nil {
+			h.log.Debug("delete secret field message", "err", err)
+		}
+	}
+	if strings.HasPrefix(value, "{") {
+		keyID, saID, privPEM, err := mws.ResolveAuthorizedKeyJSON(value)
+		deleteMsg() // JSON несёт приватный ключ — убираем сообщение в любом случае
+		if err != nil {
+			h.send(ctx, b, chatID, "⚠️ "+err.Error()+"\nПришли значение ещё раз.")
+			return true
+		}
+		h.fsm.Update(chatID, func(s *dialogState) {
+			s.AddCreds["private_key"] = privPEM
+			s.AddCreds["key_id"] = keyID
+			s.AddCreds["service_account_id"] = saID
+		})
+		h.send(ctx, b, chatID, fmt.Sprintf("✅ Разобрал JSON ключа: key_id=%s, service_account_id=%s, private_key взял оттуда же.", keyID, saID))
+		h.promptAddField(ctx, b, chatID, st.MsgID)
+		return true
+	}
+	project, sa, keyID, ok := mws.ParseResourcePath(value)
+	if !ok {
+		return false
+	}
+	if f.Secret {
+		deleteMsg()
+	}
+	var filled []string
+	h.fsm.Update(chatID, func(s *dialogState) {
+		for name, v := range map[string]string{"project_id": project, "service_account_id": sa, "key_id": keyID} {
+			if v != "" {
+				s.AddCreds[name] = v
+			}
+		}
+	})
+	for _, kv := range []struct{ name, v string }{{"project_id", project}, {"service_account_id", sa}, {"key_id", keyID}} {
+		if kv.v != "" {
+			filled = append(filled, kv.name+"="+kv.v)
+		}
+	}
+	h.send(ctx, b, chatID, "✅ Распознал путь, подставил: "+strings.Join(filled, ", ")+".")
+	h.promptAddField(ctx, b, chatID, st.MsgID)
+	return true
 }
 
 // promptAddLabel asks for an optional human label (last step). It can be skipped

@@ -48,6 +48,13 @@ func TestAuthorizedKeyJWTFlow(t *testing.T) {
 			if verifyES256(t, body.Token, &priv.PublicKey) {
 				jwtVerified = true
 			}
+			// The docs-confirmed claim shape: kid in header, sub = projects/…/serviceAccounts/….
+			if kid := jwtField(t, body.Token, 0, "kid"); kid != "key-1" {
+				t.Errorf("jwt kid = %q, want key-1", kid)
+			}
+			if sub := jwtField(t, body.Token, 1, "sub"); sub != "projects/p/serviceAccounts/sa-1" {
+				t.Errorf("jwt sub = %q, want projects/p/serviceAccounts/sa-1", sub)
+			}
 			_, _ = w.Write([]byte(`{"token":"iam-xyz"}`))
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, vpcPrefix):
 			vpcAuth = r.Header.Get("Authorization")
@@ -73,6 +80,26 @@ func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	if vpcAuth != "Bearer iam-xyz" {
 		t.Errorf("vpc auth = %q, want the exchanged IAM token", vpcAuth)
 	}
+}
+
+// jwtField decodes part `idx` (0=header, 1=payload) of a compact JWT and
+// returns the string claim `name`.
+func jwtField(t *testing.T, jwt string, idx int, name string) string {
+	t.Helper()
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		t.Fatalf("jwt has %d parts", len(parts))
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[idx])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := m[name].(string)
+	return s
 }
 
 // verifyES256 checks a compact JWT's ES256 signature against pub.
@@ -121,7 +148,7 @@ func TestKeyMixupsAreNamed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckAuthMaterial("", "", "", tc.authKey, tc.token)
+			err := CheckAuthMaterial("", "", "", "p", tc.authKey, tc.token)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -139,23 +166,65 @@ func TestCheckAuthMaterialAcceptsGoodKey(t *testing.T) {
 	keyJSON, _ := json.Marshal(map[string]string{
 		"id": "key-1", "service_account_id": "sa-1", "private_key": pemStr,
 	})
-	if err := CheckAuthMaterial("", "", "", string(keyJSON), ""); err != nil {
+	if err := CheckAuthMaterial("", "", "", "p", string(keyJSON), ""); err != nil {
 		t.Fatalf("downloaded JSON rejected: %v", err)
 	}
-	if err := CheckAuthMaterial(pemStr, "key-1", "sa-1", "", ""); err != nil {
+	if err := CheckAuthMaterial(pemStr, "key-1", "sa-1", "p", "", ""); err != nil {
 		t.Fatalf("separate fields rejected: %v", err)
 	}
 	// bare private-key PEM pasted into authorized_key is tolerated, but the
 	// key id / service account are still required
-	if err := CheckAuthMaterial("", "key-1", "sa-1", pemStr, ""); err != nil {
+	if err := CheckAuthMaterial("", "key-1", "sa-1", "p", pemStr, ""); err != nil {
 		t.Fatalf("bare PEM in authorized_key rejected: %v", err)
 	}
-	if err := CheckAuthMaterial("", "", "", pemStr, ""); err == nil {
+	if err := CheckAuthMaterial("", "", "", "p", pemStr, ""); err == nil {
 		t.Fatal("expected missing key_id/service_account_id error")
 	}
 	// token-only setup stays allowed (it just expires)
-	if err := CheckAuthMaterial("", "", "", "", "eyJhbGciOi.xx.yy"); err != nil {
+	if err := CheckAuthMaterial("", "", "", "p", "", "eyJhbGciOi.xx.yy"); err != nil {
 		t.Fatalf("token-only rejected: %v", err)
+	}
+	// project_id is always required (VPC paths and the JWT sub need it)
+	if err := CheckAuthMaterial(pemStr, "key-1", "sa-1", "", "", ""); err == nil || !strings.Contains(err.Error(), "project_id") {
+		t.Fatalf("missing project_id not named: %v", err)
+	}
+}
+
+// The user pastes the whole resource path instead of hunting for each id —
+// both the IAM form and the console URL must decompose into the three ids.
+func TestParseResourcePath(t *testing.T) {
+	for _, s := range []string{
+		"iam/projects/project-foxday128/serviceAccounts/test/authorizedKeys/access-key",
+		"projects/project-foxday128/serviceAccounts/test/authorizedKeys/access-key",
+	} {
+		p, sa, k, ok := ParseResourcePath(s)
+		if !ok || p != "project-foxday128" || sa != "test" || k != "access-key" {
+			t.Errorf("ParseResourcePath(%q) = %q,%q,%q,%v", s, p, sa, k, ok)
+		}
+	}
+	// console list URL: no key segment
+	p, sa, k, ok := ParseResourcePath("https://console.mws.ru/iam/project-foxday128/service-accounts/test/access-keys")
+	if !ok || p != "project-foxday128" || sa != "test" || k != "" {
+		t.Errorf("console URL = %q,%q,%q,%v", p, sa, k, ok)
+	}
+	if _, _, _, ok := ParseResourcePath("-----BEGIN EC PRIVATE KEY-----\nMHcC…"); ok {
+		t.Error("PEM must not parse as a resource path")
+	}
+}
+
+// A full resource path pasted into key_id must satisfy validation and the
+// provider (project/sa/key are pulled out of it).
+func TestResourcePathInKeyID(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(priv)
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	path := "iam/projects/project-foxday128/serviceAccounts/test/authorizedKeys/access-key"
+	if err := CheckAuthMaterial(pemStr, path, "", "", "", ""); err != nil {
+		t.Fatalf("path in key_id rejected: %v", err)
+	}
+	p := New(Config{PrivateKey: pemStr, KeyID: path}, provider.RollCaps{})
+	if p.keyID != "access-key" || p.saID != "test" || p.cfg.ProjectID != "project-foxday128" {
+		t.Fatalf("New did not expand path: keyID=%q saID=%q project=%q", p.keyID, p.saID, p.cfg.ProjectID)
 	}
 }
 

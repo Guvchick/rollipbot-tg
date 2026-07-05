@@ -47,11 +47,12 @@ func Fields(typ string) []Field {
 			{"api_url", false, false},
 		}
 	case "mws":
-		// Provide the ES256 key (private_key + key_id + service_account_id) — the
-		// bot auto-issues the IAM token. authorized_key (JSON) or a ready token
-		// are alternatives. Validated at runtime.
+		// The ES256 key (private_key + key_id + service_account_id) is the main
+		// path — the bot auto-issues the IAM token. authorized_key (JSON) or a
+		// ready token stay accepted as alternatives, so the required flags here
+		// are enforced by mws.CheckAuthMaterial, not the generic loop below.
 		return []Field{
-			{"private_key", false, true}, {"key_id", false, false}, {"service_account_id", false, false},
+			{"private_key", true, true}, {"key_id", true, false}, {"service_account_id", true, false},
 			{"project_id", true, false},
 			{"authorized_key", false, true}, {"token", false, true},
 			{"api_url", false, false}, {"iam_url", false, false}, {"region", false, false},
@@ -65,12 +66,33 @@ func Fields(typ string) []Field {
 	return nil
 }
 
+// WizardFields returns the fields the add-account wizard prompts for. For mws
+// only the four key fields are asked (all required): authorized_key/token stay
+// accepted in storage as alternatives, and the wizard autofills from a pasted
+// key JSON or resource path instead of asking for them.
+func WizardFields(typ string) []Field {
+	fs := Fields(typ)
+	if typ != "mws" {
+		return fs
+	}
+	var out []Field
+	for _, f := range fs {
+		switch f.Name {
+		case "private_key", "key_id", "service_account_id", "project_id":
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // ValidateCreds checks required fields are present and rejects unknown keys.
 func ValidateCreds(typ string, creds map[string]string) error {
 	known := map[string]bool{}
 	for _, f := range Fields(typ) {
 		known[f.Name] = true
-		if f.Required && creds[f.Name] == "" {
+		// mws decides required-ность in CheckAuthMaterial below: authorized_key
+		// or token are valid substitutes for the separate key fields.
+		if f.Required && creds[f.Name] == "" && typ != "mws" {
 			return &fieldError{typ, "отсутствует обязательное поле: " + f.Name}
 		}
 	}
@@ -88,7 +110,7 @@ func ValidateCreds(typ string, creds map[string]string) error {
 	}
 	if typ == "mws" {
 		// Catch key-type mix-ups (публичный ключ, API-ключ v1.…) at add time.
-		if err := mws.CheckAuthMaterial(creds["private_key"], creds["key_id"], creds["service_account_id"], creds["authorized_key"], creds["token"]); err != nil {
+		if err := mws.CheckAuthMaterial(creds["private_key"], creds["key_id"], creds["service_account_id"], creds["project_id"], creds["authorized_key"], creds["token"]); err != nil {
 			return err
 		}
 	}

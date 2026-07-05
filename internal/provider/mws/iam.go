@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +40,57 @@ func (k authorizedKey) keyID() string { return firstNonEmpty(k.ID, k.KeyID2) }
 func (k authorizedKey) saID() string  { return firstNonEmpty(k.ServiceAccountID, k.SAID2) }
 func (k authorizedKey) pem() string   { return firstNonEmpty(k.PrivateKey, k.PK2) }
 func (k authorizedKey) pub() string   { return firstNonEmpty(k.PublicKey, k.Pub2) }
+
+var (
+	// iam/projects/<p>/serviceAccounts/<sa>[/authorizedKeys/<key>]
+	iamPathRe = regexp.MustCompile(`projects/([A-Za-z0-9._-]+)/serviceAccounts/([A-Za-z0-9._-]+)(?:/authorizedKeys/([A-Za-z0-9._-]+))?`)
+	// console.mws.ru/iam/<p>/service-accounts/<sa>[/access-keys[/<key>]]
+	consolePathRe = regexp.MustCompile(`iam/([A-Za-z0-9._-]+)/service-accounts/([A-Za-z0-9._-]+)(?:/access-keys/([A-Za-z0-9._-]+))?`)
+)
+
+// ParseResourcePath pulls (project, service account, key id) out of a pasted
+// IAM resource path like
+//
+//	iam/projects/project-x/serviceAccounts/sa/authorizedKeys/access-key
+//
+// or a console URL like
+//
+//	https://console.mws.ru/iam/project-x/service-accounts/sa/access-keys
+//
+// so the user can paste the whole thing instead of hunting for each id.
+// keyID may come back empty (console list URL has no key segment).
+func ParseResourcePath(s string) (project, sa, keyID string, ok bool) {
+	s = strings.TrimSpace(s)
+	if m := iamPathRe.FindStringSubmatch(s); m != nil {
+		return m[1], m[2], m[3], true
+	}
+	if m := consolePathRe.FindStringSubmatch(s); m != nil {
+		return m[1], m[2], m[3], true
+	}
+	return "", "", "", false
+}
+
+// expandResourcePaths lets any id field carry the full pasted resource path
+// (see ParseResourcePath) and pulls the individual ids out of it. A field that
+// held the path itself is replaced by the extracted segment.
+func expandResourcePaths(keyID, saID, projectID string) (string, string, string) {
+	for _, s := range [...]string{keyID, saID, projectID} {
+		p, sa, k, ok := ParseResourcePath(s)
+		if !ok {
+			continue
+		}
+		if keyID == "" || keyID == s {
+			keyID = k
+		}
+		if saID == "" || saID == s {
+			saID = sa
+		}
+		if projectID == "" || projectID == s {
+			projectID = p
+		}
+	}
+	return keyID, saID, projectID
+}
 
 // resolveKeyMaterial merges the separate fields with whatever was pasted into
 // authorized_key. The console's «Создать» offers three key types (Авторизованный
@@ -119,8 +171,14 @@ func checkToken(tok string) error {
 
 // CheckAuthMaterial validates pasted MWS credentials at /addaccount time so
 // key-type mix-ups (публичный ключ, API-ключ v1.…, HMAC) surface immediately,
-// not on the first roll. A token-only setup is allowed (оно просто протухает).
-func CheckAuthMaterial(privateKey, keyID, serviceAccountID, authorizedKey, token string) error {
+// not on the first roll. Any id field may carry the full resource path — it is
+// expanded first. A token-only setup is allowed (оно просто протухает).
+func CheckAuthMaterial(privateKey, keyID, serviceAccountID, projectID, authorizedKey, token string) error {
+	keyID, serviceAccountID, projectID = expandResourcePaths(
+		strings.TrimSpace(keyID), strings.TrimSpace(serviceAccountID), strings.TrimSpace(projectID))
+	if projectID == "" {
+		return fmt.Errorf("mws: не хватает project_id — сегмент URL консоли после /iam/ (напр. project-foxday128)")
+	}
 	if token != "" {
 		if err := checkToken(sanitizeToken(token)); err != nil {
 			return err
@@ -133,7 +191,7 @@ func CheckAuthMaterial(privateKey, keyID, serviceAccountID, authorizedKey, token
 		}
 		return nil
 	}
-	_, _, pemStr, err := resolveKeyMaterial(strings.TrimSpace(keyID), strings.TrimSpace(serviceAccountID), privateKey, authorizedKey)
+	_, _, pemStr, err := resolveKeyMaterial(keyID, serviceAccountID, privateKey, authorizedKey)
 	if err != nil {
 		return err
 	}
@@ -141,6 +199,19 @@ func CheckAuthMaterial(privateKey, keyID, serviceAccountID, authorizedKey, token
 		return fmt.Errorf("mws: private_key: %w", err)
 	}
 	return nil
+}
+
+// ResolveAuthorizedKeyJSON validates a pasted authorized-key JSON and returns
+// the pieces the add-wizard needs to autofill its fields.
+func ResolveAuthorizedKeyJSON(s string) (keyID, saID, privPEM string, err error) {
+	keyID, saID, privPEM, err = resolveKeyMaterial("", "", "", strings.TrimSpace(s))
+	if err != nil {
+		return "", "", "", err
+	}
+	if _, err := parseECPrivateKey(privPEM); err != nil {
+		return "", "", "", fmt.Errorf("mws: private_key: %w", err)
+	}
+	return keyID, saID, privPEM, nil
 }
 
 // issueIAMToken signs an ES256 JWT with the authorized key and exchanges it for
@@ -155,8 +226,15 @@ func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error)
 		return "", time.Time{}, fmt.Errorf("mws: private_key: %w", err)
 	}
 
-	aud := p.iamBase + issueTokenPath
-	jwt, err := signES256JWT(priv, keyID, saID, aud)
+	// mws.ru/docs/…/iam/sa-get-access-token: sub = projects/<p>/serviceAccounts/<sa>.
+	sub := saID
+	if !strings.Contains(sub, "/") {
+		if p.cfg.ProjectID == "" {
+			return "", time.Time{}, fmt.Errorf("mws: нужен project_id — sub в JWT имеет вид projects/<project>/serviceAccounts/<sa>")
+		}
+		sub = fmt.Sprintf("projects/%s/serviceAccounts/%s", p.cfg.ProjectID, saID)
+	}
+	jwt, err := signES256JWT(priv, keyID, sub)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -210,12 +288,15 @@ func parseECPrivateKey(pemStr string) (*ecdsa.PrivateKey, error) {
 	return ec, nil
 }
 
-func signES256JWT(priv *ecdsa.PrivateKey, kid, iss, aud string) (string, error) {
+// signES256JWT builds the JWT the MWS IAM expects (mws.ru/docs/…/iam/
+// sa-get-access-token): header {alg ES256, kid = id авторизованного ключа},
+// payload {sub: projects/<p>/serviceAccounts/<sa>, exp}.
+func signES256JWT(priv *ecdsa.PrivateKey, kid, sub string) (string, error) {
 	b64 := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	header := b64([]byte(fmt.Sprintf(`{"typ":"JWT","alg":"ES256","kid":%q}`, kid)))
 	now := time.Now()
-	payload := b64([]byte(fmt.Sprintf(`{"iss":%q,"aud":%q,"iat":%d,"exp":%d}`,
-		iss, aud, now.Unix(), now.Add(time.Hour).Unix())))
+	payload := b64([]byte(fmt.Sprintf(`{"sub":%q,"iat":%d,"exp":%d}`,
+		sub, now.Unix(), now.Add(time.Hour).Unix())))
 	signingInput := header + "." + payload
 
 	digest := sha256.Sum256([]byte(signingInput))

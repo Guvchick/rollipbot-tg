@@ -82,11 +82,16 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 	if iamBase == "" {
 		iamBase = defaultIAMURL
 	}
+	// Any id field may carry the full pasted resource path — split it up front
+	// (addrPath interpolates ProjectID, the JWT needs the separate ids).
+	keyID, saID, projectID := expandResourcePaths(
+		strings.TrimSpace(cfg.KeyID), strings.TrimSpace(cfg.ServiceAccountID), strings.TrimSpace(cfg.ProjectID))
+	cfg.ProjectID = projectID
 	return &Provider{
 		token:       sanitizeToken(cfg.Token),
 		privPEM:     strings.TrimSpace(cfg.PrivateKey),
-		keyID:       strings.TrimSpace(cfg.KeyID),
-		saID:        strings.TrimSpace(cfg.ServiceAccountID),
+		keyID:       keyID,
+		saID:        saID,
 		authKeyJSON: strings.TrimSpace(cfg.AuthorizedKey),
 		base:        strings.TrimRight(base, "/"),
 		iamBase:     strings.TrimRight(iamBase, "/"),
