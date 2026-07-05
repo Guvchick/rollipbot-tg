@@ -39,18 +39,28 @@ const (
 )
 
 type Config struct {
-	APIURL        string // vpc base, defaults to https://vpc.mwsapis.ru
-	IAMURL        string // iam base, defaults to https://iam.mwsapis.ru
-	AuthorizedKey string // JSON of the authorized (ES256) key — bot signs the JWT itself
-	Token         string // OR a ready IAM token (Bearer), e.g. from `mws iam create-token`
-	ProjectID     string
-	Region        string // optional (unused by externalAddresses, kept for compat)
-	NetworkID     string // optional
-	SubnetworkID  string // optional
+	APIURL string // vpc base, defaults to https://vpc.mwsapis.ru
+	IAMURL string // iam base, defaults to https://iam.mwsapis.ru
+
+	// Authorized (ES256) key — the bot signs the JWT itself. Provide EITHER the
+	// three separate fields, OR the whole downloaded JSON in AuthorizedKey.
+	PrivateKey       string // ES256 private key PEM
+	KeyID            string // authorized key id (JWT kid)
+	ServiceAccountID string // service account id (JWT iss)
+	AuthorizedKey    string // OR the whole downloaded key JSON
+
+	Token        string // OR a ready IAM token (Bearer), e.g. from `mws iam create-token`
+	ProjectID    string
+	Region       string // optional (unused by externalAddresses, kept for compat)
+	NetworkID    string // optional
+	SubnetworkID string // optional
 }
 
 type Provider struct {
 	token       string
+	privPEM     string
+	keyID       string
+	saID        string
 	authKeyJSON string
 	base        string
 	iamBase     string
@@ -74,6 +84,9 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 	}
 	return &Provider{
 		token:       sanitizeToken(cfg.Token),
+		privPEM:     strings.TrimSpace(cfg.PrivateKey),
+		keyID:       strings.TrimSpace(cfg.KeyID),
+		saID:        strings.TrimSpace(cfg.ServiceAccountID),
 		authKeyJSON: strings.TrimSpace(cfg.AuthorizedKey),
 		base:        strings.TrimRight(base, "/"),
 		iamBase:     strings.TrimRight(iamBase, "/"),
@@ -83,28 +96,38 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 	}
 }
 
+// hasAuthKey reports whether an authorized key (separate fields or JSON) is set.
+func (p *Provider) hasAuthKey() bool {
+	return p.authKeyJSON != "" || p.privPEM != ""
+}
+
 // bearer returns the IAM token to send. MWS's VPC API needs a real IAM token
 // (a signed JWS), NOT the static v1.… API key (that one is only for Artifact
 // Registry / GPT). Preferred: an authorized key the bot signs into a JWT and
 // exchanges (auto-refresh). Fallback: a ready token from `mws iam create-token`.
 func (p *Provider) bearer(ctx context.Context) (string, error) {
+	// The authorized key wins over a pasted token: the bot re-issues IAM tokens
+	// itself, while a pasted one протухает и начинает давать 401.
+	if p.hasAuthKey() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
+			return p.iam, nil
+		}
+		tok, exp, err := p.issueIAMToken(ctx)
+		if err != nil {
+			return "", err
+		}
+		p.iam, p.iamExp = tok, exp
+		return tok, nil
+	}
 	if p.token != "" {
+		if err := checkToken(p.token); err != nil {
+			return "", err
+		}
 		return p.token, nil
 	}
-	if p.authKeyJSON == "" {
-		return "", fmt.Errorf("mws: нет authorized_key и token — добавь авторизованный ключ (JSON) или IAM-токен")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
-		return p.iam, nil
-	}
-	tok, exp, err := p.issueIAMToken(ctx)
-	if err != nil {
-		return "", err
-	}
-	p.iam, p.iamExp = tok, exp
-	return tok, nil
+	return "", fmt.Errorf("mws: нет ключа — задай authorized_key (JSON «Авторизованного ключа») или private_key + key_id + service_account_id, либо token")
 }
 
 // sanitizeToken removes whitespace/newlines a token can pick up when pasted
@@ -117,7 +140,7 @@ func sanitizeToken(s string) string {
 func mapErr(err error) error {
 	var apiErr *provider.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("mws: IAM-токен не принят (протух/неверный). Обнови: mws iam create-token → перезапиши token. NB: v1.… API-ключ для VPC НЕ подходит: %w", err)
+		return fmt.Errorf("mws: IAM-токен не принят (протух/неверный). Надёжно: задай authorized_key (JSON «Авторизованного ключа») — бот обновляет токен сам. Либо обнови token: mws iam create-token. NB: v1.… API-ключ для VPC НЕ подходит: %w", err)
 	}
 	return err
 }

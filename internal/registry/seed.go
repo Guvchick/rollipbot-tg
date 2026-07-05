@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"ip-roller-bot/internal/config"
+	"ip-roller-bot/internal/provider/mws"
 	"ip-roller-bot/internal/storage"
 )
 
@@ -46,9 +47,13 @@ func Fields(typ string) []Field {
 			{"api_url", false, false},
 		}
 	case "mws":
-		// Provide authorized_key (recommended, auto-refresh) OR a ready token.
+		// Provide the ES256 key (private_key + key_id + service_account_id) — the
+		// bot auto-issues the IAM token. authorized_key (JSON) or a ready token
+		// are alternatives. Validated at runtime.
 		return []Field{
-			{"authorized_key", false, true}, {"token", false, true}, {"project_id", true, false},
+			{"private_key", false, true}, {"key_id", false, false}, {"service_account_id", false, false},
+			{"project_id", true, false},
+			{"authorized_key", false, true}, {"token", false, true},
 			{"api_url", false, false}, {"iam_url", false, false}, {"region", false, false},
 			{"network_id", false, false}, {"subnetwork_id", false, false},
 		}
@@ -79,6 +84,12 @@ func ValidateCreds(typ string, creds map[string]string) error {
 			if _, err := strconv.Atoi(v); err != nil {
 				return &fieldError{typ, "region_id должно быть числом"}
 			}
+		}
+	}
+	if typ == "mws" {
+		// Catch key-type mix-ups (публичный ключ, API-ключ v1.…) at add time.
+		if err := mws.CheckAuthMaterial(creds["private_key"], creds["key_id"], creds["service_account_id"], creds["authorized_key"], creds["token"]); err != nil {
+			return err
 		}
 	}
 	return nil

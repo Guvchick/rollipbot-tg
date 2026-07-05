@@ -27,33 +27,136 @@ type authorizedKey struct {
 	ID               string `json:"id"`
 	ServiceAccountID string `json:"service_account_id"`
 	PrivateKey       string `json:"private_key"`
+	PublicKey        string `json:"public_key"`
 	// camelCase fallbacks, just in case
 	KeyID2 string `json:"keyId"`
 	SAID2  string `json:"serviceAccountId"`
 	PK2    string `json:"privateKey"`
+	Pub2   string `json:"publicKey"`
 }
 
 func (k authorizedKey) keyID() string { return firstNonEmpty(k.ID, k.KeyID2) }
 func (k authorizedKey) saID() string  { return firstNonEmpty(k.ServiceAccountID, k.SAID2) }
 func (k authorizedKey) pem() string   { return firstNonEmpty(k.PrivateKey, k.PK2) }
+func (k authorizedKey) pub() string   { return firstNonEmpty(k.PublicKey, k.Pub2) }
+
+// resolveKeyMaterial merges the separate fields with whatever was pasted into
+// authorized_key. The console's «Создать» offers three key types (Авторизованный
+// / HMAC / API-ключ v1.…) and shows the PUBLIC key in the key list — people
+// paste all of those here, so name the mix-up instead of leaking a parse error.
+func resolveKeyMaterial(keyID, saID, privPEM, authKey string) (string, string, string, error) {
+	if authKey != "" {
+		compact := strings.Join(strings.Fields(authKey), "")
+		switch {
+		case strings.HasPrefix(compact, "{"):
+			var k authorizedKey
+			if err := json.Unmarshal([]byte(authKey), &k); err != nil {
+				return "", "", "", fmt.Errorf("mws: authorized_key не парсится как JSON скачанного ключа: %w", err)
+			}
+			keyID = firstNonEmpty(keyID, k.keyID())
+			saID = firstNonEmpty(saID, k.saID())
+			privPEM = firstNonEmpty(privPEM, k.pem())
+			if privPEM == "" && k.pub() != "" {
+				return "", "", "", fmt.Errorf("mws: в JSON только public_key, а нужен private_key — приватная часть отдаётся ОДИН раз при создании «Авторизованного ключа» (скачанный файл), либо это твой priv.pem, если добавлял существующий ключ")
+			}
+		case strings.Contains(authKey, "PRIVATE KEY"):
+			// tolerate a bare private-key PEM pasted into authorized_key
+			privPEM = firstNonEmpty(privPEM, authKey)
+		case isPublicKey(authKey):
+			return "", "", "", fmt.Errorf("mws: это ПУБЛИЧНЫЙ ключ (MFkw…) из списка в консоли — по нему нельзя подписывать запросы. Нужна приватная часть: JSON, скачанный при создании «Авторизованного ключа», или твой priv.pem (в поле private_key)")
+		case strings.HasPrefix(compact, "v1."):
+			return "", "", "", fmt.Errorf("mws: это API-ключ (v1.…) — он только для Artifact Registry/GPT, VPC его не принимает. Создай «Авторизованный ключ» и вставь его JSON")
+		case strings.HasPrefix(compact, "eyJ"):
+			return "", "", "", fmt.Errorf("mws: похоже на готовый IAM-токен — он идёт в поле token (но протухает за ~час; надёжнее авторизованный ключ)")
+		default:
+			return "", "", "", fmt.Errorf("mws: authorized_key должен быть JSON скачанного «Авторизованного ключа» или PEM приватного ключа. Публичный ключ (MFkw…), HMAC- и API-ключи (v1.…) не подходят")
+		}
+	}
+	if privPEM != "" && isPublicKey(privPEM) {
+		return "", "", "", fmt.Errorf("mws: private_key: это ПУБЛИЧНЫЙ ключ — нужен приватный (-----BEGIN PRIVATE KEY----- / priv.pem)")
+	}
+	var missing []string
+	if privPEM == "" {
+		missing = append(missing, "private_key")
+	}
+	if keyID == "" {
+		missing = append(missing, "key_id")
+	}
+	if saID == "" {
+		missing = append(missing, "service_account_id")
+	}
+	if len(missing) > 0 {
+		return "", "", "", fmt.Errorf("mws: не хватает полей ключа: %s", strings.Join(missing, ", "))
+	}
+	return keyID, saID, privPEM, nil
+}
+
+// isPublicKey reports whether s is a public key: a PEM PUBLIC KEY block or the
+// bare base64 SPKI the console shows in the key list (MFkw… for P-256).
+func isPublicKey(s string) bool {
+	if strings.Contains(s, "PUBLIC KEY") {
+		return true
+	}
+	der, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+	if err != nil {
+		return false
+	}
+	_, err = x509.ParsePKIXPublicKey(der)
+	return err == nil
+}
+
+// checkToken rejects things that are definitely not an IAM token (VPC wants a
+// signed JWS) before we burn a request on a guaranteed 401.
+func checkToken(tok string) error {
+	switch {
+	case strings.HasPrefix(tok, "v1."):
+		return fmt.Errorf("mws: token — это API-ключ (v1.…), он только для Artifact Registry/GPT, VPC его не принимает. Нужен «Авторизованный ключ» (поле authorized_key) или IAM-токен из `mws iam create-token`")
+	case strings.HasPrefix(tok, "{"):
+		return fmt.Errorf("mws: в token вставлен JSON ключа — он идёт в поле authorized_key")
+	}
+	return nil
+}
+
+// CheckAuthMaterial validates pasted MWS credentials at /addaccount time so
+// key-type mix-ups (публичный ключ, API-ключ v1.…, HMAC) surface immediately,
+// not on the first roll. A token-only setup is allowed (оно просто протухает).
+func CheckAuthMaterial(privateKey, keyID, serviceAccountID, authorizedKey, token string) error {
+	if token != "" {
+		if err := checkToken(sanitizeToken(token)); err != nil {
+			return err
+		}
+	}
+	privateKey, authorizedKey = strings.TrimSpace(privateKey), strings.TrimSpace(authorizedKey)
+	if authorizedKey == "" && privateKey == "" {
+		if token == "" {
+			return fmt.Errorf("mws: нужен «Авторизованный ключ»: весь скачанный JSON в authorized_key, либо private_key + key_id + service_account_id. HMAC- и API-ключи (v1.…) не подходят")
+		}
+		return nil
+	}
+	_, _, pemStr, err := resolveKeyMaterial(strings.TrimSpace(keyID), strings.TrimSpace(serviceAccountID), privateKey, authorizedKey)
+	if err != nil {
+		return err
+	}
+	if _, err := parseECPrivateKey(pemStr); err != nil {
+		return fmt.Errorf("mws: private_key: %w", err)
+	}
+	return nil
+}
 
 // issueIAMToken signs an ES256 JWT with the authorized key and exchanges it for
 // an IAM token; returns the token and its expiry.
 func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error) {
-	var k authorizedKey
-	if err := json.Unmarshal([]byte(p.authKeyJSON), &k); err != nil {
-		return "", time.Time{}, fmt.Errorf("mws: authorized_key должен быть JSON скачанного ключа: %w", err)
+	keyID, saID, privPEM, err := resolveKeyMaterial(p.keyID, p.saID, p.privPEM, p.authKeyJSON)
+	if err != nil {
+		return "", time.Time{}, err
 	}
-	if k.keyID() == "" || k.saID() == "" || k.pem() == "" {
-		return "", time.Time{}, fmt.Errorf("mws: в authorized_key нет id / service_account_id / private_key")
-	}
-	priv, err := parseECPrivateKey(k.pem())
+	priv, err := parseECPrivateKey(privPEM)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("mws: private_key: %w", err)
 	}
 
 	aud := p.iamBase + issueTokenPath
-	jwt, err := signES256JWT(priv, k.keyID(), k.saID(), aud)
+	jwt, err := signES256JWT(priv, keyID, saID, aud)
 	if err != nil {
 		return "", time.Time{}, err
 	}
