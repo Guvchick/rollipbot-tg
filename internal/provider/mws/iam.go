@@ -1,6 +1,7 @@
 package mws
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,10 +10,19 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
+
+	"ip-roller-bot/internal/provider"
 )
+
+// issueTokenPath is the custom method that exchanges a self-signed JWT for an
+// IAM token. Reverse-engineered from the official mws CLI (v0.2.0) and живые
+// ответы iam.mwsapis.ru: метод GET, JWT идёт как Bearer, сервисный аккаунт —
+// query-параметром serviceAccount=projects/<p>/serviceAccounts/<sa>.
+const issueTokenPath = "/iam/v2/tokens/:issueServiceAccountToken"
 
 // authorizedKey is the JSON MWS gives you when you create an "Авторизованный"
 // key. Field names mirror the downloadable file (snake_case).
@@ -206,11 +216,13 @@ func ResolveAuthorizedKeyJSON(s string) (keyID, saID, privPEM string, err error)
 	return keyID, saID, privPEM, nil
 }
 
-// issueIAMToken builds the IAM token locally. Per mws.ru/docs/…/iam/
-// sa-get-access-token the self-signed ES256 JWT IS the IAM token — there is no
-// exchange endpoint (the docs even suggest jwt.io; «mws iam create-token» signs
-// locally too).
-func (p *Provider) issueIAMToken() (string, time.Time, error) {
+// issueIAMToken signs an ES256 JWT with the authorized key (header kid = id
+// ключа, payload sub = projects/<p>/serviceAccounts/<sa> — mws.ru/docs/…/iam/
+// sa-get-access-token) and exchanges it for an IAM token:
+//
+//	GET {iam}/iam/v2/tokens/:issueServiceAccountToken?serviceAccount=<sub>
+//	Authorization: Bearer <self-signed JWT>
+func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error) {
 	keyID, saID, privPEM, err := resolveKeyMaterial(p.keyID, p.saID, p.privPEM, p.authKeyJSON)
 	if err != nil {
 		return "", time.Time{}, err
@@ -220,7 +232,6 @@ func (p *Provider) issueIAMToken() (string, time.Time, error) {
 		return "", time.Time{}, fmt.Errorf("mws: private_key: %w", err)
 	}
 
-	// mws.ru/docs/…/iam/sa-get-access-token: sub = projects/<p>/serviceAccounts/<sa>.
 	sub := saID
 	if !strings.Contains(sub, "/") {
 		if p.cfg.ProjectID == "" {
@@ -228,12 +239,82 @@ func (p *Provider) issueIAMToken() (string, time.Time, error) {
 		}
 		sub = fmt.Sprintf("projects/%s/serviceAccounts/%s", p.cfg.ProjectID, saID)
 	}
-	exp := time.Now().Add(time.Hour)
-	jwt, err := signES256JWT(priv, keyID, sub, exp)
+	jwtExp := time.Now().Add(time.Hour)
+	jwt, err := signES256JWT(priv, keyID, sub, jwtExp)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	return jwt, exp, nil
+
+	// The serviceAccount query wants the full path with RAW slashes — the
+	// server routes %2F differently (проверено живьём).
+	reqURL := p.iamBase + issueTokenPath + "?serviceAccount=" + sub
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/json")
+	var resp issueTokenResponse
+	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
+		return "", time.Time{}, fmt.Errorf("mws: выпуск IAM-токена (%s): %w", issueTokenPath, err)
+	}
+	tok := resp.token()
+	if tok == "" {
+		return "", time.Time{}, fmt.Errorf("mws: пустой IAM-токен в ответе %s", issueTokenPath)
+	}
+	exp := time.Now().Add(50 * time.Minute)
+	if t, ok := resp.expiry(); ok {
+		exp = t
+	}
+	return tok, exp, nil
+}
+
+// issueTokenResponse tolerates the response shapes MWS may use: a flat token
+// string under different names, or a nested token object with value+expiry.
+type issueTokenResponse struct {
+	Token       json.RawMessage `json:"token"`
+	IAMToken    string          `json:"iamToken"`
+	AccessToken string          `json:"accessToken"`
+	Access2     string          `json:"access_token"`
+	Value       string          `json:"value"`
+	ExpiresAt   string          `json:"expiresAt"`
+	ExpireTime  string          `json:"expireTime"`
+	ExpiresIn   int64           `json:"expires_in"`
+
+	nested struct {
+		Value       string `json:"value"`
+		Token       string `json:"token"`
+		AccessToken string `json:"accessToken"`
+		ExpiresAt   string `json:"expiresAt"`
+		ExpireTime  string `json:"expireTime"`
+	}
+}
+
+func (r *issueTokenResponse) token() string {
+	var s string
+	if len(r.Token) > 0 {
+		if json.Unmarshal(r.Token, &s) != nil || s == "" {
+			// token is an object — take its inner value
+			_ = json.Unmarshal(r.Token, &r.nested)
+			s = firstNonEmpty(r.nested.Value, r.nested.Token, r.nested.AccessToken)
+		}
+	}
+	return firstNonEmpty(s, r.IAMToken, r.AccessToken, r.Access2, r.Value)
+}
+
+func (r *issueTokenResponse) expiry() (time.Time, bool) {
+	for _, v := range []string{r.ExpiresAt, r.ExpireTime, r.nested.ExpiresAt, r.nested.ExpireTime} {
+		if v == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t, true
+		}
+	}
+	if r.ExpiresIn > 0 {
+		return time.Now().Add(time.Duration(r.ExpiresIn) * time.Second), true
+	}
+	return time.Time{}, false
 }
 
 func parseECPrivateKey(pemStr string) (*ecdsa.PrivateKey, error) {

@@ -8,9 +8,11 @@
 //	create: POST   /vpc/v1/projects/{project}/externalAddresses/{name}?createOnly=true
 //	get:    GET    /vpc/v1/projects/{project}/externalAddresses/{name}
 //	delete: DELETE /vpc/v1/projects/{project}/externalAddresses/{name}
-//	auth:   Authorization: Bearer <IAM-token>, где IAM-token = самоподписанный
-//	        ES256 JWT (kid = id ключа, sub = projects/<p>/serviceAccounts/<sa>);
-//	        обмена нет — «mws iam create-token» тоже подписывает локально
+//	auth:   Authorization: Bearer <IAM-token>; IAM-токен выдаёт
+//	        GET iam.mwsapis.ru/iam/v2/tokens/:issueServiceAccountToken
+//	        ?serviceAccount=projects/<p>/serviceAccounts/<sa> с самоподписанным
+//	        ES256 JWT (kid = id ключа, sub = тот же путь) в Bearer —
+//	        флоу восстановлен из официального mws CLI, в доках его нет
 //	body:   {"kind":"vpc/v1/externalAddress","metadata":{"name":"..."}}
 //	ip:     response.status.ipAddress ; id for release = metadata.name
 package mws
@@ -121,7 +123,7 @@ func (p *Provider) bearer(ctx context.Context) (string, error) {
 		if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
 			return p.iam, nil
 		}
-		tok, exp, err := p.issueIAMToken()
+		tok, exp, err := p.issueIAMToken(ctx)
 		if err != nil {
 			return "", err
 		}

@@ -19,10 +19,10 @@ import (
 	"ip-roller-bot/internal/provider"
 )
 
-// End-to-end: the bot self-signs an ES256 JWT with the authorized key and uses
-// it directly as the Bearer for the VPC call (per docs there is no exchange).
-// The mock VPC server's auth header is cryptographically verified, so a bad
-// signature fails the test.
+// End-to-end: the bot signs an ES256 JWT, exchanges it via
+// GET :issueServiceAccountToken (Bearer = JWT, serviceAccount query), and uses
+// the returned IAM token for the VPC call. The mock IAM server verifies the
+// JWT cryptographically, so a bad signature fails the test.
 func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -35,19 +35,39 @@ func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	})
 
 	const vpcPrefix = "/vpc/v1/projects/p/externalAddresses/"
+	var jwtVerified bool
 	var vpcAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, vpcPrefix) {
+		switch {
+		case r.URL.Path == "/iam/v2/tokens/:issueServiceAccountToken":
+			if r.Method != http.MethodGet {
+				t.Errorf("issue method = %s, want GET", r.Method)
+			}
+			if sa := r.URL.Query().Get("serviceAccount"); sa != "projects/p/serviceAccounts/sa-1" {
+				t.Errorf("serviceAccount = %q, want projects/p/serviceAccounts/sa-1", sa)
+			}
+			jwt := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if verifyES256(t, jwt, &priv.PublicKey) {
+				jwtVerified = true
+			}
+			if kid := jwtField(t, jwt, 0, "kid"); kid != "key-1" {
+				t.Errorf("jwt kid = %q, want key-1", kid)
+			}
+			if sub := jwtField(t, jwt, 1, "sub"); sub != "projects/p/serviceAccounts/sa-1" {
+				t.Errorf("jwt sub = %q, want projects/p/serviceAccounts/sa-1", sub)
+			}
+			_, _ = w.Write([]byte(`{"token":"iam-xyz"}`))
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, vpcPrefix):
+			vpcAuth = r.Header.Get("Authorization")
+			name := strings.TrimPrefix(r.URL.Path, vpcPrefix)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"` + name + `"},"status":{"ipAddress":"89.108.7.7"}}`))
+		default:
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		vpcAuth = r.Header.Get("Authorization")
-		name := strings.TrimPrefix(r.URL.Path, vpcPrefix)
-		_, _ = w.Write([]byte(`{"metadata":{"name":"` + name + `"},"status":{"ipAddress":"89.108.7.7"}}`))
 	}))
 	defer srv.Close()
 
-	p := New(Config{APIURL: srv.URL, AuthorizedKey: string(keyJSON), ProjectID: "p"}, provider.RollCaps{})
+	p := New(Config{APIURL: srv.URL, IAMURL: srv.URL, AuthorizedKey: string(keyJSON), ProjectID: "p"}, provider.RollCaps{})
 	ip, err := p.Allocate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -55,16 +75,36 @@ func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	if ip.Addr.String() != "89.108.7.7" {
 		t.Fatalf("ip = %v", ip.Addr)
 	}
-	jwt := strings.TrimPrefix(vpcAuth, "Bearer ")
-	if jwt == vpcAuth || !verifyES256(t, jwt, &priv.PublicKey) {
-		t.Fatalf("vpc auth %q is not a Bearer JWT signed by our key", vpcAuth)
+	if !jwtVerified {
+		t.Error("IAM server did not receive a valid ES256 JWT")
 	}
-	// The docs-confirmed claim shape: kid in header, sub = projects/…/serviceAccounts/….
-	if kid := jwtField(t, jwt, 0, "kid"); kid != "key-1" {
-		t.Errorf("jwt kid = %q, want key-1", kid)
+	if vpcAuth != "Bearer iam-xyz" {
+		t.Errorf("vpc auth = %q, want the issued IAM token", vpcAuth)
 	}
-	if sub := jwtField(t, jwt, 1, "sub"); sub != "projects/p/serviceAccounts/sa-1" {
-		t.Errorf("jwt sub = %q, want projects/p/serviceAccounts/sa-1", sub)
+}
+
+// The issue response may nest the token in an object — both shapes must parse.
+func TestIssueTokenResponseShapes(t *testing.T) {
+	cases := map[string]string{
+		`{"token":"tok-flat"}`:                    "tok-flat",
+		`{"iamToken":"tok-iam"}`:                  "tok-iam",
+		`{"access_token":"tok-oauth"}`:            "tok-oauth",
+		`{"token":{"value":"tok-nested"}}`:        "tok-nested",
+		`{"token":{"accessToken":"tok-nested2"}}`: "tok-nested2",
+	}
+	for in, want := range cases {
+		var r issueTokenResponse
+		if err := json.Unmarshal([]byte(in), &r); err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if got := r.token(); got != want {
+			t.Errorf("token(%s) = %q, want %q", in, got, want)
+		}
+	}
+	var r issueTokenResponse
+	_ = json.Unmarshal([]byte(`{"token":"x","expireTime":"2030-01-02T03:04:05Z"}`), &r)
+	if exp, ok := r.expiry(); !ok || exp.Year() != 2030 {
+		t.Errorf("expiry = %v %v", exp, ok)
 	}
 }
 
@@ -226,21 +266,21 @@ func TestAuthorizedKeyPreferredOverToken(t *testing.T) {
 
 	var vpcAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/iam/v2/tokens/:issueServiceAccountToken" {
+			_, _ = w.Write([]byte(`{"token":"iam-fresh"}`))
+			return
+		}
 		vpcAuth = r.Header.Get("Authorization")
 		name := strings.TrimPrefix(r.URL.Path, "/vpc/v1/projects/p/externalAddresses/")
 		_, _ = w.Write([]byte(`{"metadata":{"name":"` + name + `"},"status":{"ipAddress":"89.108.7.7"}}`))
 	}))
 	defer srv.Close()
 
-	p := New(Config{APIURL: srv.URL, AuthorizedKey: string(keyJSON), Token: "stale-token", ProjectID: "p"}, provider.RollCaps{})
+	p := New(Config{APIURL: srv.URL, IAMURL: srv.URL, AuthorizedKey: string(keyJSON), Token: "stale-token", ProjectID: "p"}, provider.RollCaps{})
 	if _, err := p.Allocate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if vpcAuth == "Bearer stale-token" {
-		t.Fatal("vpc got the stale pasted token, want a freshly signed JWT")
-	}
-	jwt := strings.TrimPrefix(vpcAuth, "Bearer ")
-	if !verifyES256(t, jwt, &priv.PublicKey) {
-		t.Fatalf("vpc auth %q is not signed by the authorized key", vpcAuth)
+	if vpcAuth != "Bearer iam-fresh" {
+		t.Fatalf("vpc auth = %q, want the freshly issued IAM token, not the stale pasted one", vpcAuth)
 	}
 }
