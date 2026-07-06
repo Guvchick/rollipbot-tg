@@ -8,7 +8,9 @@
 //	create: POST   /vpc/v1/projects/{project}/externalAddresses/{name}?createOnly=true
 //	get:    GET    /vpc/v1/projects/{project}/externalAddresses/{name}
 //	delete: DELETE /vpc/v1/projects/{project}/externalAddresses/{name}
-//	auth:   Authorization: Bearer <IAM-token>   (mws iam create-token)
+//	auth:   Authorization: Bearer <IAM-token>, где IAM-token = самоподписанный
+//	        ES256 JWT (kid = id ключа, sub = projects/<p>/serviceAccounts/<sa>);
+//	        обмена нет — «mws iam create-token» тоже подписывает локально
 //	body:   {"kind":"vpc/v1/externalAddress","metadata":{"name":"..."}}
 //	ip:     response.status.ipAddress ; id for release = metadata.name
 package mws
@@ -106,12 +108,12 @@ func (p *Provider) hasAuthKey() bool {
 	return p.authKeyJSON != "" || p.privPEM != ""
 }
 
-// bearer returns the IAM token to send. MWS's VPC API needs a real IAM token
-// (a signed JWS), NOT the static v1.… API key (that one is only for Artifact
-// Registry / GPT). Preferred: an authorized key the bot signs into a JWT and
-// exchanges (auto-refresh). Fallback: a ready token from `mws iam create-token`.
+// bearer returns the IAM token to send. MWS's VPC API needs an IAM token —
+// a self-signed ES256 JWS (NOT the static v1.… API key, that one is only for
+// Artifact Registry / GPT). Preferred: an authorized key the bot signs itself
+// (auto-refresh). Fallback: a ready token from `mws iam create-token`.
 func (p *Provider) bearer(ctx context.Context) (string, error) {
-	// The authorized key wins over a pasted token: the bot re-issues IAM tokens
+	// The authorized key wins over a pasted token: the bot re-signs IAM tokens
 	// itself, while a pasted one протухает и начинает давать 401.
 	if p.hasAuthKey() {
 		p.mu.Lock()
@@ -119,7 +121,7 @@ func (p *Provider) bearer(ctx context.Context) (string, error) {
 		if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
 			return p.iam, nil
 		}
-		tok, exp, err := p.issueIAMToken(ctx)
+		tok, exp, err := p.issueIAMToken()
 		if err != nil {
 			return "", err
 		}
@@ -145,7 +147,7 @@ func sanitizeToken(s string) string {
 func mapErr(err error) error {
 	var apiErr *provider.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("mws: IAM-токен не принят (протух/неверный). Надёжно: задай authorized_key (JSON «Авторизованного ключа») — бот обновляет токен сам. Либо обнови token: mws iam create-token. NB: v1.… API-ключ для VPC НЕ подходит: %w", err)
+		return fmt.Errorf("mws: VPC не принял токен (401). Проверь в консоли: публичный ключ «Авторизованного ключа» совпадает с твоим private_key, key_id — точный ID ключа, project_id и service_account_id верные. NB: v1.… API-ключ и HMAC для VPC НЕ подходят: %w", err)
 	}
 	return err
 }

@@ -1,7 +1,6 @@
 package mws
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,17 +9,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"net/http"
 	"regexp"
 	"strings"
 	"time"
-
-	"ip-roller-bot/internal/provider"
 )
-
-// issueTokenPath is the custom method that exchanges a signed JWT for an IAM
-// token. Confirmed from mws.ru/docs (iam v1).
-const issueTokenPath = "/iam/v1/tokens/:issueServiceAccountToken"
 
 // authorizedKey is the JSON MWS gives you when you create an "Авторизованный"
 // key. Field names mirror the downloadable file (snake_case).
@@ -214,9 +206,11 @@ func ResolveAuthorizedKeyJSON(s string) (keyID, saID, privPEM string, err error)
 	return keyID, saID, privPEM, nil
 }
 
-// issueIAMToken signs an ES256 JWT with the authorized key and exchanges it for
-// an IAM token; returns the token and its expiry.
-func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error) {
+// issueIAMToken builds the IAM token locally. Per mws.ru/docs/…/iam/
+// sa-get-access-token the self-signed ES256 JWT IS the IAM token — there is no
+// exchange endpoint (the docs even suggest jwt.io; «mws iam create-token» signs
+// locally too).
+func (p *Provider) issueIAMToken() (string, time.Time, error) {
 	keyID, saID, privPEM, err := resolveKeyMaterial(p.keyID, p.saID, p.privPEM, p.authKeyJSON)
 	if err != nil {
 		return "", time.Time{}, err
@@ -234,37 +228,12 @@ func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error)
 		}
 		sub = fmt.Sprintf("projects/%s/serviceAccounts/%s", p.cfg.ProjectID, saID)
 	}
-	jwt, err := signES256JWT(priv, keyID, sub)
+	exp := time.Now().Add(time.Hour)
+	jwt, err := signES256JWT(priv, keyID, sub, exp)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-
-	// Body field for the JWT is "token" (endpoint schema exposes apiKey/token/secret).
-	body, _ := json.Marshal(map[string]any{"token": jwt})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.iamBase+issueTokenPath, strings.NewReader(string(body)))
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	var resp struct {
-		Token      string `json:"token"`
-		IAMToken   string `json:"iamToken"`
-		ExpiresAt  string `json:"expiresAt"`
-		ExpireTime string `json:"expireTime"`
-	}
-	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
-		return "", time.Time{}, fmt.Errorf("mws: обмен JWT→IAM: %w", err)
-	}
-	tok := firstNonEmpty(resp.Token, resp.IAMToken)
-	if tok == "" {
-		return "", time.Time{}, fmt.Errorf("mws: пустой IAM-токен в ответе обмена")
-	}
-	exp := time.Now().Add(50 * time.Minute)
-	if t, err := time.Parse(time.RFC3339, firstNonEmpty(resp.ExpiresAt, resp.ExpireTime)); err == nil {
-		exp = t
-	}
-	return tok, exp, nil
+	return jwt, exp, nil
 }
 
 func parseECPrivateKey(pemStr string) (*ecdsa.PrivateKey, error) {
@@ -288,15 +257,14 @@ func parseECPrivateKey(pemStr string) (*ecdsa.PrivateKey, error) {
 	return ec, nil
 }
 
-// signES256JWT builds the JWT the MWS IAM expects (mws.ru/docs/…/iam/
+// signES256JWT builds the JWT MWS expects (mws.ru/docs/…/iam/
 // sa-get-access-token): header {alg ES256, kid = id авторизованного ключа},
-// payload {sub: projects/<p>/serviceAccounts/<sa>, exp}.
-func signES256JWT(priv *ecdsa.PrivateKey, kid, sub string) (string, error) {
+// payload {sub: projects/<p>/serviceAccounts/<sa>, exp} — ровно как в доке,
+// без лишних claim'ов.
+func signES256JWT(priv *ecdsa.PrivateKey, kid, sub string, exp time.Time) (string, error) {
 	b64 := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	header := b64([]byte(fmt.Sprintf(`{"typ":"JWT","alg":"ES256","kid":%q}`, kid)))
-	now := time.Now()
-	payload := b64([]byte(fmt.Sprintf(`{"sub":%q,"iat":%d,"exp":%d}`,
-		sub, now.Unix(), now.Add(time.Hour).Unix())))
+	payload := b64([]byte(fmt.Sprintf(`{"sub":%q,"exp":%d}`, sub, exp.Unix())))
 	signingInput := header + "." + payload
 
 	digest := sha256.Sum256([]byte(signingInput))
