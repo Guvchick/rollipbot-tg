@@ -255,22 +255,46 @@ func TestIssueIAMTokenSurfaces401Hint(t *testing.T) {
 	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	der, _ := x509.MarshalPKCS8PrivateKey(priv)
 	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"code":"UNAUTHENTICATED","description":"JWS parsing attempt failed."}`))
-	}))
-	defer srv.Close()
 
-	p := New(Config{IAMURL: srv.URL, PrivateKey: pemStr, KeyID: "k", ServiceAccountID: "sa", ProjectID: "proj"}, provider.RollCaps{})
-	_, _, err := p.issueIAMToken(context.Background())
-	if err == nil {
-		t.Fatal("expected an error on 401")
-	}
-	for _, want := range []string{"key_id", "sub", "401"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("401 error %q does not mention %q", err, want)
+	// (a) body «JWS parsing attempt failed» → parse-level hint (points at MWS_DEBUG,
+	// not key/sub — the JWS didn't even parse).
+	t.Run("jws-parse body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"UNAUTHENTICATED","description":"JWS parsing attempt failed."}`))
+		}))
+		defer srv.Close()
+		p := New(Config{IAMURL: srv.URL, PrivateKey: pemStr, KeyID: "k", ServiceAccountID: "sa", ProjectID: "proj"}, provider.RollCaps{})
+		_, _, err := p.issueIAMToken(context.Background())
+		if err == nil {
+			t.Fatal("expected an error on 401")
 		}
-	}
+		for _, want := range []string{"JWS", "401", "MWS_DEBUG"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("parse-level 401 error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	// (b) empty-body 401 with a grpc-message header → verification hint (key_id/sub),
+	// and the folded header detail surfaces in the error.
+	t.Run("empty body with grpc-message header", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Grpc-Message", "signature verification failed")
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		p := New(Config{IAMURL: srv.URL, PrivateKey: pemStr, KeyID: "k", ServiceAccountID: "sa", ProjectID: "proj"}, provider.RollCaps{})
+		_, _, err := p.issueIAMToken(context.Background())
+		if err == nil {
+			t.Fatal("expected an error on 401")
+		}
+		for _, want := range []string{"key_id", "sub", "401", "signature verification failed"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("verification 401 error %q does not mention %q", err, want)
+			}
+		}
+	})
 }
 
 func TestNoCredentialsError(t *testing.T) {

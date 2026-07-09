@@ -291,14 +291,19 @@ func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error)
 	return tok, exp, nil
 }
 
-// mapIssueErr turns the IAM endpoint's 401 into an actionable hint. A 401 here
-// (typically «JWS parsing attempt failed») means the mint endpoint got our
-// self-signed JWT but couldn't accept it — almost always a key/claim mismatch,
-// not a wiring bug now that the JWT rides in the POST body.
+// mapIssueErr turns the IAM endpoint's 401 into an actionable hint. Two shapes:
+//   - body «JWS parsing attempt failed» → сервер не смог разобрать JWT как JWS
+//     (структура/кодировка запроса) — редко после перехода на тело POST {"jwt":…}.
+//   - пустое тело (или grpc-message в заголовке) → JWS распарсился, но НЕ прошёл
+//     ПРОВЕРКУ: не тот key_id (kid), публичный ключ в консоли не совпадает с
+//     private_key, не тот sub, или не хватает claim'ов (iat/aud) / часы отстали.
 func mapIssueErr(err error) error {
 	var apiErr *provider.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("IAM отклонил самоподписанный JWT (401, обычно «JWS parsing attempt failed»). Проверь: key_id = точный ID «Авторизованного ключа», его публичный ключ в консоли совпадает с твоим private_key (ES256/P-256); sub = projects/<project>/serviceAccounts/<sa>; часы не отстают (exp в будущем). JWT уходит в теле POST {\"jwt\":…}, не в Authorization: %w", err)
+		if strings.Contains(strings.ToLower(apiErr.Body), "jws parsing") {
+			return fmt.Errorf("IAM не смог разобрать JWT как JWS (401). Обычно самоподписанный JWT дошёл, но в неверной форме — запусти MWS_DEBUG=1 и сверь тело запроса {\"jwt\":…} и claims: %w", err)
+		}
+		return fmt.Errorf("IAM отклонил самоподписанный JWT на ПРОВЕРКЕ (401, JWS уже распарсился). Сверь: key_id = точный ID «Авторизованного ключа»; его публичный ключ в консоли соответствует твоему private_key (ES256/P-256); sub = projects/<project>/serviceAccounts/<sa>; часы не отстают (exp в будущем). Детали — в заголовках ответа (MWS_DEBUG=1: grpc-message/www-authenticate): %w", err)
 	}
 	return err
 }
@@ -374,17 +379,18 @@ func parseECPrivateKey(pemStr string) (*ecdsa.PrivateKey, error) {
 
 // signES256JWT builds the JWT MWS expects (mws.ru/docs/…/iam/
 // sa-get-access-token): header {typ JWT, alg ES256, kid = id авторизованного
-// ключа}, payload {sub: projects/<p>/serviceAccounts/<sa>, exp} — ровно как в
-// доке, без лишних claim'ов (iss/aud/iat доки НЕ требуют, поэтому не шлём —
-// лишний aud с неверным URL сервер бы отверг). The signed JWT is then POSTed
-// in the {"jwt":…} body by issueIAMToken.
+// ключа}, payload {sub: projects/<p>/serviceAccounts/<sa>, iat, exp}. We include
+// iat — почти все JWS-валидаторы его требуют/ждут, и оно безопасно (нет значения,
+// которое сервер мог бы «не признать»). iss/aud НЕ шлём: их доки не требуют, а
+// лишний aud с неверным URL сервер бы отверг. The signed JWT is then POSTed in
+// the {"jwt":…} body by issueIAMToken.
 //
 // The signature is JOSE ES256: raw R||S, each big-endian left-padded to 32
 // bytes (P-256), base64url without padding — NOT a DER/ASN.1 sequence.
 func signES256JWT(priv *ecdsa.PrivateKey, kid, sub string, exp time.Time) (string, error) {
 	b64 := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	header := b64([]byte(fmt.Sprintf(`{"typ":"JWT","alg":"ES256","kid":%q}`, kid)))
-	payload := b64([]byte(fmt.Sprintf(`{"sub":%q,"exp":%d}`, sub, exp.Unix())))
+	payload := b64([]byte(fmt.Sprintf(`{"sub":%q,"iat":%d,"exp":%d}`, sub, time.Now().Unix(), exp.Unix())))
 	signingInput := header + "." + payload
 
 	digest := sha256.Sum256([]byte(signingInput))
