@@ -9,10 +9,11 @@
 //	get:    GET    /vpc/v1/projects/{project}/externalAddresses/{name}
 //	delete: DELETE /vpc/v1/projects/{project}/externalAddresses/{name}
 //	auth:   Authorization: Bearer <IAM-token>; IAM-токен выдаёт
-//	        GET iam.mwsapis.ru/iam/v2/tokens/:issueServiceAccountToken
-//	        ?serviceAccount=projects/<p>/serviceAccounts/<sa> с самоподписанным
-//	        ES256 JWT (kid = id ключа, sub = тот же путь) в Bearer —
-//	        флоу восстановлен из официального mws CLI, в доках его нет
+//	        POST iam.mwsapis.ru/iam/v2/tokens/:issueServiceAccountToken
+//	        ?serviceAccount=projects/<p>/serviceAccounts/<sa> с телом
+//	        {"jwt":"<самоподписанный ES256 JWT>"} (kid = id ключа, sub = тот же
+//	        путь) — Google-/Yandex-стиль mint-эндпоинта (POST /iam/v2/tokens,
+//	        JWT в теле, mws.ru/docs/api/auth). JWT-обмена в доках IAM нет.
 //	body:   {"kind":"vpc/v1/externalAddress","metadata":{"name":"..."}}
 //	ip:     response.status.ipAddress ; id for release = metadata.name
 package mws
@@ -218,7 +219,7 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 		return provider.AllocatedIP{}, err
 	}
 	var ea externalAddress
-	if err := provider.DoJSON(p.client, req, p.Name(), &ea); err != nil {
+	if err := p.doDebug(req, &ea); err != nil {
 		return provider.AllocatedIP{}, mapErr(err)
 	}
 	// The delete path uses the NAME, so that (not metadata.id) is our resource id.
@@ -249,7 +250,7 @@ func (p *Provider) waitForIP(ctx context.Context, name string) (string, error) {
 			return "", err
 		}
 		var ea externalAddress
-		if err := provider.DoJSON(p.client, req, p.Name(), &ea); err != nil {
+		if err := p.doDebug(req, &ea); err != nil {
 			return "", err
 		}
 		if ea.Status.IPAddress != "" {
@@ -271,7 +272,7 @@ func (p *Provider) Release(ctx context.Context, ip provider.AllocatedIP) error {
 	if err != nil {
 		return err
 	}
-	return provider.DoJSON(p.client, req, p.Name(), nil)
+	return p.doDebug(req, nil)
 }
 
 func (p *Provider) releaseQuietly(id string) {

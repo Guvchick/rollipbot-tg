@@ -62,7 +62,9 @@ func menuBackKeyboard() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{backToMenuRow()}}
 }
 
-// accountsMenu lists accounts with per-account toggle/delete and an add button.
+// accountsMenu lists accounts with per-account controls. Each account gets two
+// rows: row 1 is the enable/disable toggle + delete; row 2 groups the config
+// actions (daily cap, proxy, 🎯 IP-presets, 🔁 auto-roll).
 func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
 	var rows [][]models.InlineKeyboardButton
 	for _, a := range accs {
@@ -78,18 +80,75 @@ func accountsMenu(accs []accountRow) *models.InlineKeyboardMarkup {
 		if a.DailyCap != "" {
 			cap = "📅" + a.DailyCap
 		}
-		rows = append(rows, []models.InlineKeyboardButton{
-			{Text: fmt.Sprintf("%s %s", flag, a.Display), CallbackData: fmt.Sprintf("acc:toggle:%d", a.ID)},
-			{Text: cap, CallbackData: fmt.Sprintf("acc:cap:%d", a.ID)},
-			{Text: px, CallbackData: fmt.Sprintf("acc:proxy:%d", a.ID)},
-			{Text: "🗑", CallbackData: fmt.Sprintf("acc:del:%d", a.ID)},
-		})
+		presets := "🎯"
+		if a.Presets > 0 {
+			presets = fmt.Sprintf("🎯%d", a.Presets)
+		}
+		auto := "🔁"
+		if a.Auto {
+			auto = "🔁✓"
+		}
+		rows = append(rows,
+			[]models.InlineKeyboardButton{
+				{Text: fmt.Sprintf("%s %s", flag, a.Display), CallbackData: fmt.Sprintf("acc:toggle:%d", a.ID)},
+				{Text: "🗑", CallbackData: fmt.Sprintf("acc:del:%d", a.ID)},
+			},
+			[]models.InlineKeyboardButton{
+				{Text: cap, CallbackData: fmt.Sprintf("acc:cap:%d", a.ID)},
+				{Text: px, CallbackData: fmt.Sprintf("acc:proxy:%d", a.ID)},
+				{Text: presets, CallbackData: fmt.Sprintf("acc:masks:%d", a.ID)},
+				{Text: auto, CallbackData: fmt.Sprintf("acc:auto:%d", a.ID)},
+			},
+		)
 	}
 	rows = append(rows,
 		[]models.InlineKeyboardButton{{Text: "➕ Добавить аккаунт", CallbackData: "acc:add"}},
 		backToMenuRow(),
 	)
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// presetsMenu renders the IP-preset manager for one account: each saved mask
+// with a delete button, plus add/back.
+func presetsMenu(accountID int64, masks []string) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	for _, m := range masks {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: "🎯 " + m, CallbackData: "pmask:noop"},
+			{Text: "🗑", CallbackData: fmt.Sprintf("pmask:del:%d:%s", accountID, m)},
+		})
+	}
+	rows = append(rows,
+		[]models.InlineKeyboardButton{{Text: "➕ Добавить пресет", CallbackData: fmt.Sprintf("pmask:add:%d", accountID)}},
+		[]models.InlineKeyboardButton{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}},
+	)
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// autoRollMenu renders the per-account auto-roll config: enable/disable, a budget
+// picker, a "run now" button, and back.
+func autoRollMenu(accountID int64, enabled bool, budget int) *models.InlineKeyboardMarkup {
+	toggle := "▶️ Включить авто-ролл"
+	if enabled {
+		toggle = "⏸ Выключить авто-ролл"
+	}
+	var budgetRow []models.InlineKeyboardButton
+	for _, n := range []int{5, 10, 25, 50} {
+		label := fmt.Sprintf("%d", n)
+		if n == budget {
+			label = "✓" + label
+		}
+		budgetRow = append(budgetRow, models.InlineKeyboardButton{
+			Text: label, CallbackData: fmt.Sprintf("auto:budget:%d:%d", accountID, n),
+		})
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: toggle, CallbackData: fmt.Sprintf("auto:toggle:%d", accountID)}},
+		budgetRow,
+		{{Text: "🎯 Пресеты", CallbackData: fmt.Sprintf("acc:masks:%d", accountID)},
+			{Text: "🔁 Прогнать сейчас", CallbackData: fmt.Sprintf("auto:now:%d", accountID)}},
+		{{Text: "⬅️ К аккаунтам", CallbackData: "acc:list"}},
+	}}
 }
 
 // addTypeKeyboard lists provider types for the first step of the add wizard.
@@ -145,6 +204,8 @@ type accountRow struct {
 	Enabled  bool
 	Proxy    string // bound proxy label, empty if none
 	DailyCap string // per-account cap marker (e.g. "10" or "∞"), empty if type default
+	Presets  int    // number of saved IP-preset masks
+	Auto     bool   // auto-roll enabled for this account
 }
 
 // dailyCapPicker offers preset rolls-per-day caps plus custom/unlimited/default.

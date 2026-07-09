@@ -89,6 +89,14 @@ func (n *Notifier) QuotaExceeded(ctx context.Context, b *bot.Bot, account string
 		esc(account), esc(when), rolledBlock(rolled)))
 }
 
+// AutoRoll logs the outcome of a scheduled (every-24h) auto-roll into the
+// account's topic, so the automatic runs are distinguishable from manual ones.
+func (n *Notifier) AutoRoll(ctx context.Context, b *bot.Bot, account, summary string, rolled []string) {
+	n.post(ctx, b, account, fmt.Sprintf(
+		"🔁 <b>Авто-ролл (по расписанию)</b>\nАккаунт: %s\n%s%s",
+		esc(account), esc(summary), rolledBlock(rolled)))
+}
+
 // rolledBlock renders the rolled addresses as an expandable blockquote, capping
 // the list so the message stays within Telegram limits.
 func rolledBlock(rolled []string) string {

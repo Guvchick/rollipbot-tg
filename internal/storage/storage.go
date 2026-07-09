@@ -78,6 +78,16 @@ type ProviderStat struct {
 	Today    int // rolls today
 }
 
+// AutoRoll is the per-account automatic-rolling configuration. The masks used
+// are the account's saved presets (account_masks); Budget is the attempt cap
+// per scheduled run; LastRun is when the scheduler last rolled it (zero = never).
+type AutoRoll struct {
+	AccountID int64
+	Enabled   bool
+	Budget    int
+	LastRun   time.Time
+}
+
 // Storage is the persistence contract.
 type Storage interface {
 	AddPoolIP(ctx context.Context, ip PoolIP) (int64, error)
@@ -118,6 +128,18 @@ type Storage interface {
 	BindProxy(ctx context.Context, accountID, proxyID int64) error
 	UnbindProxy(ctx context.Context, accountID int64) error
 	AccountProxy(ctx context.Context, accountID int64) (Proxy, bool, error)
+
+	// Per-account preset masks ("IP presets"): target masks saved per account,
+	// offered as buttons in the roll wizard and used by auto-roll.
+	ListAccountMasks(ctx context.Context, accountID int64) ([]string, error)
+	AddAccountMask(ctx context.Context, accountID int64, mask string) error
+	RemoveAccountMask(ctx context.Context, accountID int64, mask string) error
+
+	// Per-account auto-roll config + scheduler bookkeeping.
+	GetAutoRoll(ctx context.Context, accountID int64) (AutoRoll, bool, error)
+	SetAutoRoll(ctx context.Context, ar AutoRoll) error
+	ListAutoRoll(ctx context.Context) ([]AutoRoll, error)
+	TouchAutoRollRun(ctx context.Context, accountID int64, at time.Time) error
 
 	// Roll statistics (aggregated per provider key)
 	RollStats(ctx context.Context) ([]ProviderStat, error)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGO
 )
@@ -72,6 +73,18 @@ CREATE TABLE IF NOT EXISTS account_proxy (
 CREATE TABLE IF NOT EXISTS account_daily_cap (
     account_id INTEGER PRIMARY KEY,
     daily_cap  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_masks (
+    account_id INTEGER NOT NULL,
+    mask       TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, mask)
+);
+CREATE TABLE IF NOT EXISTS account_autoroll (
+    account_id INTEGER PRIMARY KEY,
+    enabled    BOOLEAN NOT NULL DEFAULT 0,
+    budget     INTEGER NOT NULL DEFAULT 25,
+    last_run   TIMESTAMP
 );`
 
 // SQLite is a modernc.org/sqlite-backed Storage.
@@ -275,6 +288,17 @@ func (s *SQLite) DeleteAccount(ctx context.Context, id int64) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	// Drop per-account side tables so a re-created account (new id) starts clean.
+	for _, q := range []string{
+		`DELETE FROM account_proxy WHERE account_id = ?`,
+		`DELETE FROM account_daily_cap WHERE account_id = ?`,
+		`DELETE FROM account_masks WHERE account_id = ?`,
+		`DELETE FROM account_autoroll WHERE account_id = ?`,
+	} {
+		if _, derr := s.db.ExecContext(ctx, q, id); derr != nil {
+			return derr
+		}
+	}
 	return nil
 }
 
@@ -449,6 +473,97 @@ func (s *SQLite) AccountDailyCap(ctx context.Context, accountID int64) (int, boo
 		return 0, false, err
 	}
 	return cap, true, nil
+}
+
+// --- per-account preset masks ---
+
+func (s *SQLite) ListAccountMasks(ctx context.Context, accountID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT mask FROM account_masks WHERE account_id = ? ORDER BY created_at, mask`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) AddAccountMask(ctx context.Context, accountID int64, mask string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO account_masks (account_id, mask) VALUES (?, ?)
+		 ON CONFLICT(account_id, mask) DO NOTHING`, accountID, mask)
+	return err
+}
+
+func (s *SQLite) RemoveAccountMask(ctx context.Context, accountID int64, mask string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM account_masks WHERE account_id = ? AND mask = ?`, accountID, mask)
+	return err
+}
+
+// --- per-account auto-roll ---
+
+func (s *SQLite) GetAutoRoll(ctx context.Context, accountID int64) (AutoRoll, bool, error) {
+	ar := AutoRoll{AccountID: accountID}
+	var lastRun sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT enabled, budget, last_run FROM account_autoroll WHERE account_id = ?`, accountID).
+		Scan(&ar.Enabled, &ar.Budget, &lastRun)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AutoRoll{AccountID: accountID}, false, nil
+	}
+	if err != nil {
+		return AutoRoll{}, false, err
+	}
+	if lastRun.Valid {
+		ar.LastRun = lastRun.Time
+	}
+	return ar, true, nil
+}
+
+func (s *SQLite) SetAutoRoll(ctx context.Context, ar AutoRoll) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO account_autoroll (account_id, enabled, budget) VALUES (?, ?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET enabled = excluded.enabled, budget = excluded.budget`,
+		ar.AccountID, ar.Enabled, ar.Budget)
+	return err
+}
+
+func (s *SQLite) ListAutoRoll(ctx context.Context) ([]AutoRoll, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT account_id, enabled, budget, last_run FROM account_autoroll ORDER BY account_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AutoRoll
+	for rows.Next() {
+		var ar AutoRoll
+		var lastRun sql.NullTime
+		if err := rows.Scan(&ar.AccountID, &ar.Enabled, &ar.Budget, &lastRun); err != nil {
+			return nil, err
+		}
+		if lastRun.Valid {
+			ar.LastRun = lastRun.Time
+		}
+		out = append(out, ar)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) TouchAutoRollRun(ctx context.Context, accountID int64, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO account_autoroll (account_id, last_run) VALUES (?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET last_run = excluded.last_run`,
+		accountID, at.UTC())
+	return err
 }
 
 // --- stats ---

@@ -25,6 +25,8 @@ const (
 	stepProxyLine // waiting for the proxy host:port[:login:pass] line
 	// per-account custom daily cap
 	stepDailyCap // waiting for a custom rolls-per-day number
+	// per-account IP preset
+	stepAddPreset // waiting for a preset mask to save for an account
 )
 
 // dialogState is the per-chat conversation state.
@@ -52,6 +54,9 @@ type dialogState struct {
 
 	// per-account custom daily cap
 	CapAccountID int64
+
+	// per-account IP preset being added
+	PresetAccountID int64
 }
 
 // FSM holds dialog state per chat behind a mutex.

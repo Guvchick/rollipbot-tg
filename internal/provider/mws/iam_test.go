@@ -20,9 +20,9 @@ import (
 )
 
 // End-to-end: the bot signs an ES256 JWT, exchanges it via
-// GET :issueServiceAccountToken (Bearer = JWT, serviceAccount query), and uses
-// the returned IAM token for the VPC call. The mock IAM server verifies the
-// JWT cryptographically, so a bad signature fails the test.
+// POST :issueServiceAccountToken (JWT in the {"jwt":…} body, serviceAccount
+// query), and uses the returned IAM token for the VPC call. The mock IAM server
+// verifies the JWT cryptographically, so a bad signature fails the test.
 func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -40,13 +40,18 @@ func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/iam/v2/tokens/:issueServiceAccountToken":
-			if r.Method != http.MethodGet {
-				t.Errorf("issue method = %s, want GET", r.Method)
+			if r.Method != http.MethodPost {
+				t.Errorf("issue method = %s, want POST", r.Method)
+			}
+			// The mint endpoint must NOT require an Authorization token — the
+			// self-signed JWT rides in the body, not the Bearer header.
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("issue Authorization = %q, want empty (JWT goes in the body)", got)
 			}
 			if sa := r.URL.Query().Get("serviceAccount"); sa != "projects/p/serviceAccounts/sa-1" {
 				t.Errorf("serviceAccount = %q, want projects/p/serviceAccounts/sa-1", sa)
 			}
-			jwt := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			jwt := readJWTBody(t, r)
 			if verifyES256(t, jwt, &priv.PublicKey) {
 				jwtVerified = true
 			}
@@ -108,13 +113,13 @@ func TestIssueTokenResponseShapes(t *testing.T) {
 	}
 }
 
-// jwtField decodes part `idx` (0=header, 1=payload) of a compact JWT and
-// returns the string claim `name`.
-func jwtField(t *testing.T, jwt string, idx int, name string) string {
+// jwtClaims decodes part `idx` (0=header, 1=payload) of a compact JWT into its
+// JSON object.
+func jwtClaims(t *testing.T, jwt string, idx int) map[string]any {
 	t.Helper()
 	parts := strings.Split(jwt, ".")
 	if len(parts) != 3 {
-		t.Fatalf("jwt has %d parts", len(parts))
+		t.Fatalf("jwt has %d parts, want 3", len(parts))
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[idx])
 	if err != nil {
@@ -124,7 +129,14 @@ func jwtField(t *testing.T, jwt string, idx int, name string) string {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	s, _ := m[name].(string)
+	return m
+}
+
+// jwtField decodes part `idx` (0=header, 1=payload) of a compact JWT and
+// returns the string claim `name`.
+func jwtField(t *testing.T, jwt string, idx int, name string) string {
+	t.Helper()
+	s, _ := jwtClaims(t, jwt, idx)[name].(string)
 	return s
 }
 
@@ -143,6 +155,122 @@ func verifyES256(t *testing.T, jwt string, pub *ecdsa.PublicKey) bool {
 	r := new(big.Int).SetBytes(sig[:32])
 	s := new(big.Int).SetBytes(sig[32:])
 	return ecdsa.Verify(pub, digest[:], r, s)
+}
+
+// readJWTBody pulls the self-signed JWT out of the exchange body {"jwt":"..."}.
+func readJWTBody(t *testing.T, r *http.Request) string {
+	t.Helper()
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("issue Content-Type = %q, want application/json", ct)
+	}
+	var body struct {
+		JWT string `json:"jwt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatalf("issue body is not JSON {\"jwt\":…}: %v", err)
+	}
+	if body.JWT == "" {
+		t.Fatal(`issue body has no "jwt" field — server would answer "JWS parsing attempt failed"`)
+	}
+	return body.JWT
+}
+
+// TestIssueIAMTokenRequestShape locks the exact wire contract of the token
+// exchange (the thing that regressed into HTTP 401 «JWS parsing attempt
+// failed»): POST, the :issueServiceAccountToken path, a {"jwt":…} JSON body
+// whose JWT parses into header{typ,alg,kid} + payload{sub,exp}, and no stray
+// iss/aud that MWS docs don't ask for.
+func TestIssueIAMTokenRequestShape(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKCS8PrivateKey(priv)
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+
+	var (
+		gotMethod, gotPath, gotJWT string
+		gotAuth                    = "SENTINEL"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotJWT = readJWTBody(t, r)
+		_, _ = w.Write([]byte(`{"token":"iam-abc","expireTime":"2030-01-02T03:04:05Z"}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{IAMURL: srv.URL, PrivateKey: pemStr, KeyID: "key-9", ServiceAccountID: "sa-9", ProjectID: "proj-9"}, provider.RollCaps{})
+	tok, exp, err := p.issueIAMToken(context.Background())
+	if err != nil {
+		t.Fatalf("issueIAMToken: %v", err)
+	}
+	if tok != "iam-abc" {
+		t.Errorf("token = %q, want iam-abc", tok)
+	}
+	if exp.Year() != 2030 {
+		t.Errorf("expiry = %v, want the response expireTime", exp)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %s, want POST", gotMethod)
+	}
+	if gotPath != "/iam/v2/tokens/:issueServiceAccountToken" {
+		t.Errorf("path = %q, want /iam/v2/tokens/:issueServiceAccountToken", gotPath)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty (JWT belongs in the body)", gotAuth)
+	}
+	// The JWT must be a valid ES256 JWS with exactly the documented claims.
+	if !verifyES256(t, gotJWT, &priv.PublicKey) {
+		t.Fatal("body JWT did not verify as ES256")
+	}
+	if typ := jwtField(t, gotJWT, 0, "typ"); typ != "JWT" {
+		t.Errorf("jwt typ = %q, want JWT", typ)
+	}
+	if alg := jwtField(t, gotJWT, 0, "alg"); alg != "ES256" {
+		t.Errorf("jwt alg = %q, want ES256", alg)
+	}
+	if kid := jwtField(t, gotJWT, 0, "kid"); kid != "key-9" {
+		t.Errorf("jwt kid = %q, want key-9", kid)
+	}
+	if sub := jwtField(t, gotJWT, 1, "sub"); sub != "projects/proj-9/serviceAccounts/sa-9" {
+		t.Errorf("jwt sub = %q, want projects/proj-9/serviceAccounts/sa-9", sub)
+	}
+	// exp must be present and in the future; iss/aud are intentionally absent
+	// (MWS docs list only sub + exp).
+	payload := jwtClaims(t, gotJWT, 1)
+	if _, ok := payload["exp"]; !ok {
+		t.Error("jwt payload missing exp")
+	}
+	for _, unexpected := range []string{"iss", "aud"} {
+		if _, ok := payload[unexpected]; ok {
+			t.Errorf("jwt payload has %q, which MWS docs do not require", unexpected)
+		}
+	}
+}
+
+// mapIssueErr must turn the IAM endpoint's 401 into an actionable hint that
+// names where the JWT goes and what to check.
+func TestIssueIAMTokenSurfaces401Hint(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(priv)
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"UNAUTHENTICATED","description":"JWS parsing attempt failed."}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{IAMURL: srv.URL, PrivateKey: pemStr, KeyID: "k", ServiceAccountID: "sa", ProjectID: "proj"}, provider.RollCaps{})
+	_, _, err := p.issueIAMToken(context.Background())
+	if err == nil {
+		t.Fatal("expected an error on 401")
+	}
+	for _, want := range []string{"key_id", "sub", "401"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("401 error %q does not mention %q", err, want)
+		}
+	}
 }
 
 func TestNoCredentialsError(t *testing.T) {

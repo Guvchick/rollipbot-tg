@@ -104,6 +104,7 @@ type Account struct {
 	key   string
 	typ   string
 	label string
+	id    int64
 }
 
 // NewAccount builds an account wrapper. The key (typ#id) is stable across
@@ -114,6 +115,7 @@ func NewAccount(inner Provider, typ, label string, id int64) *Account {
 		key:      fmt.Sprintf("%s#%d", typ, id),
 		typ:      typ,
 		label:    label,
+		id:       id,
 	}
 }
 
@@ -121,6 +123,7 @@ func (a *Account) Name() string  { return a.key }   // engine keys on this
 func (a *Account) Key() string   { return a.key }   // alias, for clarity at call sites
 func (a *Account) Type() string  { return a.typ }   // provider type, e.g. "timeweb"
 func (a *Account) Label() string { return a.label } // human label
+func (a *Account) ID() int64     { return a.id }    // accounts-table row id
 
 // APIError wraps a non-2xx HTTP response from a provider REST API.
 type APIError struct {

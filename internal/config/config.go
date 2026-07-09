@@ -18,7 +18,28 @@ type Config struct {
 	Telegram  TelegramConfig  `yaml:"telegram"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Notify    NotifyConfig    `yaml:"notify"`
+	AutoRoll  AutoRollConfig  `yaml:"autoroll"`
 	Providers ProvidersConfig `yaml:"providers"`
+}
+
+// AutoRollConfig controls the background scheduler that re-rolls accounts which
+// opted into auto-roll (per-account toggle set via the bot), once per interval.
+// Enabled is a pointer so an omitted block defaults ON (per-account toggle is the
+// real gate); set `autoroll.enabled: false` to kill the loop entirely.
+type AutoRollConfig struct {
+	Enabled       *bool `yaml:"enabled"`
+	IntervalHours int   `yaml:"interval_hours"` // how often an opted-in account re-rolls (default 24)
+}
+
+// IsEnabled reports whether the auto-roll scheduler should run at all.
+func (a AutoRollConfig) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
+
+// Interval returns the configured re-roll interval, defaulting to 24h.
+func (a AutoRollConfig) Interval() time.Duration {
+	if a.IntervalHours <= 0 {
+		return 24 * time.Hour
+	}
+	return time.Duration(a.IntervalHours) * time.Hour
 }
 
 // NotifyConfig configures pushing roll/catch logs to a separate Telegram forum

@@ -42,8 +42,10 @@ func Fields(typ string) []Field {
 			{"api_url", false, false},
 		}
 	case "gcore":
+		// region_id is optional: leave it empty to roll across ANY region
+		// (the adapter enumerates regions and spreads rolls over them).
 		return []Field{
-			{"api_token", true, true}, {"project_id", true, false}, {"region_id", true, false},
+			{"api_token", true, true}, {"project_id", true, false}, {"region_id", false, false},
 			{"api_url", false, false},
 		}
 	case "mws":

@@ -97,6 +97,9 @@ func Run(
 		bot.WithCallbackQueryDataHandler("pxscheme:", bot.MatchTypePrefix, h.cbProxyScheme),
 		bot.WithCallbackQueryDataHandler("accpx:", bot.MatchTypePrefix, h.cbAccountProxyBind),
 		bot.WithCallbackQueryDataHandler("acccap:", bot.MatchTypePrefix, h.cbAccountCap),
+		// IP presets + auto-roll callbacks
+		bot.WithCallbackQueryDataHandler("pmask:", bot.MatchTypePrefix, h.cbPresets),
+		bot.WithCallbackQueryDataHandler("auto:", bot.MatchTypePrefix, h.cbAutoRoll),
 		// roll wizard callbacks
 		bot.WithCallbackQueryDataHandler("prov:", bot.MatchTypePrefix, h.cbProvider),
 		bot.WithCallbackQueryDataHandler("mask:", bot.MatchTypePrefix, h.cbMask),
@@ -120,6 +123,7 @@ func Run(
 	}}); err != nil {
 		log.Debug("set my commands failed", "err", err)
 	}
+	h.startAutoRoll(ctx, b)
 	log.Info("bot запущен", "accounts", reg.Len())
 	b.Start(ctx)
 	return nil
@@ -460,8 +464,21 @@ func (h *Handler) accountsView(ctx context.Context) (string, *models.InlineKeybo
 		if capMark != "" {
 			capNote = " 📅" + capMark + "/сут"
 		}
-		fmt.Fprintf(&sb, "• #%d %s [%s]%s%s — %s\n", a.ID, disp, flag, capNote, pxNote, maskCreds(a.Provider, a.Credentials))
-		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled, Proxy: pxLabel, DailyCap: capMark})
+		presets, _ := h.store.ListAccountMasks(ctx, a.ID)
+		presetNote := ""
+		if len(presets) > 0 {
+			presetNote = fmt.Sprintf(" 🎯%d", len(presets))
+		}
+		autoOn := false
+		if ar, ok, _ := h.store.GetAutoRoll(ctx, a.ID); ok {
+			autoOn = ar.Enabled
+		}
+		autoNote := ""
+		if autoOn {
+			autoNote = " 🔁"
+		}
+		fmt.Fprintf(&sb, "• #%d %s [%s]%s%s%s%s — %s\n", a.ID, disp, flag, capNote, presetNote, autoNote, pxNote, maskCreds(a.Provider, a.Credentials))
+		rows = append(rows, accountRow{ID: a.ID, Display: disp, Enabled: a.Enabled, Proxy: pxLabel, DailyCap: capMark, Presets: len(presets), Auto: autoOn})
 	}
 	return sb.String(), accountsMenu(rows)
 }
@@ -741,6 +758,20 @@ func (h *Handler) cbAccount(ctx context.Context, b *bot.Bot, u *models.Update) {
 	case strings.HasPrefix(data, "cap:"):
 		h.cbAccountCapPick(ctx, b, chatID, msgID, strings.TrimPrefix(data, "cap:"))
 		return
+	case strings.HasPrefix(data, "masks:"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(data, "masks:"), 10, 64)
+		if err != nil {
+			return
+		}
+		h.showPresets(ctx, b, chatID, msgID, id)
+		return
+	case strings.HasPrefix(data, "auto:"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(data, "auto:"), 10, 64)
+		if err != nil {
+			return
+		}
+		h.showAutoRoll(ctx, b, chatID, msgID, id)
+		return
 	case data == "addhelp": // legacy: text /addaccount help
 		h.sendHTML(ctx, b, chatID, generalAddHelpHTML())
 		return
@@ -795,7 +826,7 @@ func (h *Handler) cbProvider(ctx context.Context, b *bot.Bot, u *models.Update) 
 		s.Provider = key
 		s.MsgID = msgID
 	})
-	masks := h.providerMasks(acc.Type())
+	masks := h.masksForAccount(ctx, acc)
 	text := fmt.Sprintf("2/4 — %s.\nВведи маску текстом (185.12.0.0/16 или 95.142.*.*).\n"+
 		"Можно сразу несколько — по одной на строку или через запятую, поймаю попадание в любую.\n"+
 		"Или выбери пресет:", accountDisplay(acc))
@@ -888,6 +919,8 @@ func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.acceptProxyLine(ctx, b, chatID, u.Message.ID, text)
 	case stepDailyCap:
 		h.acceptDailyCap(ctx, b, chatID, text)
+	case stepAddPreset:
+		h.acceptPresetMask(ctx, b, chatID, text)
 	default:
 		h.send(ctx, b, chatID, "Открой меню кнопкой ниже или пришли /start.")
 	}

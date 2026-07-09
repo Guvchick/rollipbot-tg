@@ -10,6 +10,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"ip-roller-bot/internal/provider/gcore"
 	"ip-roller-bot/internal/provider/mws"
 	"ip-roller-bot/internal/registry"
 	"ip-roller-bot/internal/storage"
@@ -117,9 +118,13 @@ func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 	if st.AddType == "mws" && h.mwsAutofill(ctx, b, chatID, userMsgID, f, value) {
 		return
 	}
+	// gcore: вставленная ссылка на проект раскладывается на project_id/region_id.
+	if st.AddType == "gcore" && h.gcoreAutofill(ctx, b, chatID, f, value) {
+		return
+	}
 	if st.AddType == "gcore" && f.Name == "region_id" {
 		if _, err := strconv.Atoi(value); err != nil {
-			h.send(ctx, b, chatID, "region_id должно быть числом (напр. 7). Пришли ещё раз.")
+			h.send(ctx, b, chatID, "region_id должно быть числом (напр. 7) — или нажми «Пропустить», чтобы роллить по любому региону.")
 			return
 		}
 	}
@@ -190,6 +195,42 @@ func (h *Handler) mwsAutofill(ctx context.Context, b *bot.Bot, chatID int64, use
 		}
 	}
 	h.send(ctx, b, chatID, "✅ Распознал путь, подставил: "+strings.Join(filled, ", ")+".")
+	h.promptAddField(ctx, b, chatID, st.MsgID)
+	return true
+}
+
+// gcoreAutofill lets the admin paste a Gcore console URL / project link into the
+// project_id (or region_id) step instead of hunting for the ids: it pulls
+// project_id — and region_id when the URL carries it — out of the link and skips
+// the filled steps. A bare numeric id falls through to the normal path. Returns
+// true when the value was consumed (fields filled or a hint shown).
+func (h *Handler) gcoreAutofill(ctx context.Context, b *bot.Bot, chatID int64, f registry.Field, value string) bool {
+	if f.Name != "project_id" && f.Name != "region_id" {
+		return false
+	}
+	// Only intercept URL-shaped input; plain ids go through the normal path.
+	if !strings.Contains(value, "/") && !strings.Contains(value, "gcore") {
+		return false
+	}
+	projectID, regionID, ok := gcore.ParseConsoleURL(value)
+	if !ok || projectID == "" {
+		h.send(ctx, b, chatID, "⚠️ Не смог вытащить project_id из ссылки. Пришли числовой project_id или полную ссылку на проект (…/projects/<id>/…).")
+		return true
+	}
+	st := h.fsm.Get(chatID)
+	h.fsm.Update(chatID, func(s *dialogState) {
+		s.AddCreds["project_id"] = projectID
+		if regionID > 0 {
+			s.AddCreds["region_id"] = strconv.Itoa(regionID)
+		}
+	})
+	msg := "✅ Из ссылки: project_id=" + projectID
+	if regionID > 0 {
+		msg += ", region_id=" + strconv.Itoa(regionID)
+	} else {
+		msg += " (region_id не в ссылке — можно пропустить для «любого региона»)"
+	}
+	h.send(ctx, b, chatID, msg+".")
 	h.promptAddField(ctx, b, chatID, st.MsgID)
 	return true
 }

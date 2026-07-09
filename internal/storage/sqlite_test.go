@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newStore(t *testing.T) *SQLite {
@@ -85,6 +86,80 @@ func TestAccountDailyCapOverride(t *testing.T) {
 	}
 	if _, ok, _ := st.AccountDailyCap(ctx, accID); ok {
 		t.Error("override should be gone after clear")
+	}
+}
+
+func TestAccountMasksPresets(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	accID, err := st.UpsertAccount(ctx, Account{Provider: "gcore", Label: "a", Enabled: true, Credentials: map[string]string{"api_token": "x", "project_id": "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms, _ := st.ListAccountMasks(ctx, accID); len(ms) != 0 {
+		t.Fatalf("fresh presets = %v, want none", ms)
+	}
+	for _, m := range []string{"92.38.0.0/16", "5.188.*.*"} {
+		if err := st.AddAccountMask(ctx, accID, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// duplicate add is a no-op (no error, no dup row)
+	if err := st.AddAccountMask(ctx, accID, "92.38.0.0/16"); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := st.ListAccountMasks(ctx, accID)
+	if err != nil || len(ms) != 2 {
+		t.Fatalf("presets = %v (err %v), want 2", ms, err)
+	}
+	if err := st.RemoveAccountMask(ctx, accID, "5.188.*.*"); err != nil {
+		t.Fatal(err)
+	}
+	ms, _ = st.ListAccountMasks(ctx, accID)
+	if len(ms) != 1 || ms[0] != "92.38.0.0/16" {
+		t.Fatalf("after remove = %v, want [92.38.0.0/16]", ms)
+	}
+	// deleting the account clears its presets
+	if err := st.DeleteAccount(ctx, accID); err != nil {
+		t.Fatal(err)
+	}
+	if ms, _ := st.ListAccountMasks(ctx, accID); len(ms) != 0 {
+		t.Errorf("presets after account delete = %v, want none", ms)
+	}
+}
+
+func TestAutoRollConfig(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	accID, err := st.UpsertAccount(ctx, Account{Provider: "timeweb", Label: "a", Enabled: true, Credentials: map[string]string{"token": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.GetAutoRoll(ctx, accID); ok {
+		t.Fatal("no auto-roll config should exist initially")
+	}
+	if err := st.SetAutoRoll(ctx, AutoRoll{AccountID: accID, Enabled: true, Budget: 30}); err != nil {
+		t.Fatal(err)
+	}
+	ar, ok, err := st.GetAutoRoll(ctx, accID)
+	if err != nil || !ok || !ar.Enabled || ar.Budget != 30 {
+		t.Fatalf("auto-roll = %+v ok=%v err=%v", ar, ok, err)
+	}
+	if !ar.LastRun.IsZero() {
+		t.Errorf("LastRun should be zero before first run, got %v", ar.LastRun)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := st.TouchAutoRollRun(ctx, accID, now); err != nil {
+		t.Fatal(err)
+	}
+	// touch must not clobber enabled/budget
+	ar, _, _ = st.GetAutoRoll(ctx, accID)
+	if !ar.Enabled || ar.Budget != 30 || ar.LastRun.Unix() != now.Unix() {
+		t.Fatalf("after touch = %+v, want enabled budget=30 lastrun=%v", ar, now)
+	}
+	list, err := st.ListAutoRoll(ctx)
+	if err != nil || len(list) != 1 || list[0].AccountID != accID {
+		t.Fatalf("ListAutoRoll = %+v (err %v), want one row", list, err)
 	}
 }
 

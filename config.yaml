@@ -22,6 +22,14 @@ notify:
   enabled: false
   chat_id: 0                    # напр. -1001234567890
 
+# Авто-ролл: раз в interval_hours бот сам роллит аккаунты, у которых включён
+# тумблер 🔁 (🔐 Аккаунты → 🔁), по их 🎯 IP-пресетам, и пишет итог в топик
+# аккаунта. enabled: false — глобально выключить расписание (пер-аккаунт тумблеры
+# перестанут срабатывать). Пропущенный блок = включено (гейт — пер-аккаунт).
+autoroll:
+  enabled: true
+  interval_hours: 24
+
 # ВНИМАНИЕ: креды провайдеров теперь хранятся в SQL-таблице accounts (можно
 # несколько аккаунтов на каждый тип). Блоки providers ниже — это (1) дефолты по
 # типу (caps, маски, strategy, region/zone/auth_url) и (2) ОДНОРАЗОВЫЙ сид: при
@@ -96,8 +104,8 @@ providers:
     enabled: false
     api_url: https://api.gcore.com/cloud
     api_token: ${GCORE_API_TOKEN}     # заголовок: Authorization: apikey <token>
-    project_id: ${GCORE_PROJECT_ID}
-    region_id: 7
+    project_id: ${GCORE_PROJECT_ID}   # можно вставить ссылку на проект — id вытащится из URL
+    region_id: 0                      # 0/пусто = роллить по ЛЮБОМУ региону (бот переберёт); задай число, чтобы закрепить регион
     strategy: floating
     max_rolls_per_run: 40
     daily_cap: 0
