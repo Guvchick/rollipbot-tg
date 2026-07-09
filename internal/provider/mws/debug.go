@@ -1,6 +1,8 @@
 package mws
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,6 +24,12 @@ import (
 // The decoded JWT header/payload (claims) are safe to share; redact the rest.
 
 var debugHTTP = envTrue("MWS_DEBUG")
+
+// probeMintShapes (MWS_PROBE=1) turns on the one-shot request-shape probe in
+// issueIAMToken: on each token issue it tries the plausible mint-request shapes
+// and logs the HTTP status of each, so a single roll reveals which form MWS
+// accepts — or that ALL 401 (→ the problem is the key/claims, not the shape).
+var probeMintShapes = envTrue("MWS_PROBE")
 
 func envTrue(k string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
@@ -115,6 +123,86 @@ func headerDetail(h http.Header) string {
 		return "(пустое тело ответа, в заголовках нет деталей — запусти MWS_DEBUG=1 и сверь claims JWT/заголовки)"
 	}
 	return strings.Join(parts, "; ")
+}
+
+func plog(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[mws-probe] "+format+"\n", args...)
+}
+
+// mintVariant is one candidate shape of the JWT→IAM-token exchange request.
+type mintVariant struct {
+	name   string
+	method string
+	url    string
+	body   []byte // nil for GET
+	bearer bool   // also send Authorization: Bearer <jwt>
+}
+
+// mintVariants enumerates the plausible request shapes for the mint endpoint,
+// covering the two ways the JWT can travel (body field vs Authorization header),
+// the body field-name candidates (jwt/assertion/token), the query vs no-query
+// path, and the Yandex-style /iam/v2/tokens collection.
+func (p *Provider) mintVariants(jwt, sub string) []mintVariant {
+	field := func(name string) []byte {
+		b, _ := json.Marshal(map[string]string{name: jwt})
+		return b
+	}
+	q := issueTokenPath + "?serviceAccount=" + sub
+	return []mintVariant{
+		{"POST :issue?query body{jwt}", http.MethodPost, p.iamBase + q, field("jwt"), false},
+		{"POST :issue body{jwt} (no query)", http.MethodPost, p.iamBase + issueTokenPath, field("jwt"), false},
+		{"POST /iam/v2/tokens body{jwt}", http.MethodPost, p.iamBase + "/iam/v2/tokens", field("jwt"), false},
+		{"GET :issue?query Bearer (original)", http.MethodGet, p.iamBase + q, nil, true},
+		{"POST :issue?query body{assertion}", http.MethodPost, p.iamBase + q, field("assertion"), false},
+		{"POST :issue?query body{token}", http.MethodPost, p.iamBase + q, field("token"), false},
+		{"POST :issue?query body{jwt}+Bearer", http.MethodPost, p.iamBase + q, field("jwt"), true},
+	}
+}
+
+// probeMint fires each candidate shape once, logs its HTTP status (and short
+// body), and returns the first response that carries a token. All-401 means the
+// key/claims are wrong, not the request shape.
+func (p *Provider) probeMint(ctx context.Context, jwt, sub string) (*issueTokenResponse, string, bool) {
+	plog("перебираю формы запроса выпуска IAM-токена (по одному запросу на форму)…")
+	for _, v := range p.mintVariants(jwt, sub) {
+		var body io.Reader
+		if v.body != nil {
+			body = bytes.NewReader(v.body)
+		}
+		req, err := http.NewRequestWithContext(ctx, v.method, v.url, body)
+		if err != nil {
+			plog("%-38s → ошибка сборки запроса: %v", v.name, err)
+			continue
+		}
+		req.Header.Set("Accept", "application/json")
+		if v.body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if v.bearer {
+			req.Header.Set("Authorization", "Bearer "+jwt)
+		}
+		resp, err := p.client.Do(req)
+		if err != nil {
+			plog("%-38s → transport error: %v", v.name, err)
+			continue
+		}
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		detail := strings.TrimSpace(string(rb))
+		if detail == "" {
+			detail = headerDetail(resp.Header)
+		}
+		plog("%-38s → HTTP %d  %s", v.name, resp.StatusCode, detail)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			var r issueTokenResponse
+			if json.Unmarshal(rb, &r) == nil && r.token() != "" {
+				plog("✅ РАБОЧАЯ ФОРМА: %s — зафиксируй её как постоянную", v.name)
+				return &r, v.name, true
+			}
+		}
+	}
+	plog("⛔ ни одна форма не принята — значит дело в КЛЮЧЕ/CLAIMS (key_id/kid, публичный ключ в консоли ≠ private_key, sub), а не в форме запроса")
+	return nil, "", false
 }
 
 // decodeJWTField pulls the JWT out of a {"jwt":"..."} request body and returns

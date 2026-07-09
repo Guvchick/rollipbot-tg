@@ -263,6 +263,21 @@ func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error)
 		return "", time.Time{}, err
 	}
 
+	// Diagnostic mode: try the candidate request shapes and use whatever the
+	// server accepts (or conclude it's a key/claims problem). MWS_PROBE=1.
+	if probeMintShapes {
+		if r, _, ok := p.probeMint(ctx, jwt, sub); ok {
+			// A shape worked — use the token so the roll proceeds; the winning
+			// shape is logged as «РАБОЧАЯ ФОРМА» in [mws-probe] to hardcode later.
+			exp := time.Now().Add(50 * time.Minute)
+			if t, ok := r.expiry(); ok {
+				exp = t
+			}
+			return r.token(), exp, nil
+		}
+		return "", time.Time{}, fmt.Errorf("mws: probe — ни одна форма запроса не принята (все → 401): дело в ключе/claims, а не в форме. Проверь key_id (=kid), что публичный ключ этого «Авторизованного ключа» в консоли — пара к твоему private_key (ES256/P-256), и sub=projects/<p>/serviceAccounts/<sa>. Подробности по каждой форме — в логах [mws-probe]")
+	}
+
 	// The serviceAccount query wants the full path with RAW slashes — the
 	// server routes %2F differently (проверено живьём).
 	reqURL := p.iamBase + issueTokenPath + "?serviceAccount=" + sub
