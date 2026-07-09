@@ -213,6 +213,7 @@ func buildAdapter(typ string, creds map[string]string, b *config.ProviderConfig,
 			Region:           get("region", b.Region),
 			NetworkID:        creds["network_id"],
 			SubnetworkID:     creds["subnetwork_id"],
+			RefreshCurl:      creds["refresh_curl"],
 		}, caps), nil
 
 	case "ruvds":

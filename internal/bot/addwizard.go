@@ -158,6 +158,21 @@ func (h *Handler) mwsAutofill(ctx context.Context, b *bot.Bot, chatID int64, use
 			h.log.Debug("delete secret field message", "err", err)
 		}
 	}
+	// «Через браузер»: a pasted DevTools "Copy as cURL" (auto-refresh) or a
+	// ready IAM/Bearer token → route to refresh_curl / token and jump to the only
+	// other field the browser path needs, project_id.
+	trimmed := strings.TrimSpace(value)
+	low := strings.ToLower(trimmed)
+	if strings.HasPrefix(low, "curl ") || strings.Contains(low, "authorization:") {
+		deleteMsg()
+		h.setMWSBrowserCred(ctx, b, chatID, "refresh_curl", trimmed, "запрос браузера (refresh_curl) — буду сам обновлять токен")
+		return true
+	}
+	if strings.HasPrefix(trimmed, "eyJ") && strings.Count(trimmed, ".") >= 2 {
+		deleteMsg()
+		h.setMWSBrowserCred(ctx, b, chatID, "token", trimmed, "готовый IAM-токен из браузера (протухает за ~час)")
+		return true
+	}
 	if strings.HasPrefix(value, "{") {
 		keyID, saID, privPEM, err := mws.ResolveAuthorizedKeyJSON(value)
 		deleteMsg() // JSON несёт приватный ключ — убираем сообщение в любом случае
@@ -233,6 +248,26 @@ func (h *Handler) gcoreAutofill(ctx context.Context, b *bot.Bot, chatID int64, f
 	h.send(ctx, b, chatID, msg+".")
 	h.promptAddField(ctx, b, chatID, st.MsgID)
 	return true
+}
+
+// setMWSBrowserCred stores a browser-obtained credential (refresh_curl or a
+// ready token) and jumps the wizard to project_id — the only other field the
+// «через браузер» path needs (the ES256-key steps are skipped).
+func (h *Handler) setMWSBrowserCred(ctx context.Context, b *bot.Bot, chatID int64, key, val, human string) {
+	st := h.fsm.Get(chatID)
+	idx := len(st.AddFields)
+	for i, f := range st.AddFields {
+		if f.Name == "project_id" {
+			idx = i
+			break
+		}
+	}
+	h.fsm.Update(chatID, func(s *dialogState) {
+		s.AddCreds[key] = val
+		s.AddIdx = idx
+	})
+	h.send(ctx, b, chatID, "✅ Принял "+human+". Осталось указать project_id (ID проекта — сегмент URL консоли после /iam/).")
+	h.promptAddField(ctx, b, chatID, st.MsgID)
 }
 
 // promptAddLabel asks for an optional human label (last step). It can be skipped

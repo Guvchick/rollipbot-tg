@@ -59,6 +59,12 @@ type Config struct {
 	Region       string // optional (unused by externalAddresses, kept for compat)
 	NetworkID    string // optional
 	SubnetworkID string // optional
+
+	// RefreshCurl — «эмуляция браузера»: the DevTools "Copy as cURL" of the
+	// request the console itself makes to mint/refresh its IAM token. When set,
+	// the bot replays it and reuses the returned token (auto-refresh), bypassing
+	// the self-signed-JWT mint entirely.
+	RefreshCurl string
 }
 
 type Provider struct {
@@ -67,6 +73,7 @@ type Provider struct {
 	keyID       string
 	saID        string
 	authKeyJSON string
+	refreshCurl string
 	base        string
 	iamBase     string
 	cfg         Config
@@ -98,6 +105,7 @@ func New(cfg Config, caps provider.RollCaps) *Provider {
 		keyID:       keyID,
 		saID:        saID,
 		authKeyJSON: strings.TrimSpace(cfg.AuthorizedKey),
+		refreshCurl: strings.TrimSpace(cfg.RefreshCurl),
 		base:        strings.TrimRight(base, "/"),
 		iamBase:     strings.TrimRight(iamBase, "/"),
 		cfg:         cfg,
@@ -116,6 +124,22 @@ func (p *Provider) hasAuthKey() bool {
 // Artifact Registry / GPT). Preferred: an authorized key the bot signs itself
 // (auto-refresh). Fallback: a ready token from `mws iam create-token`.
 func (p *Provider) bearer(ctx context.Context) (string, error) {
+	// «Эмуляция браузера»: if a captured console token-request is set, replay it
+	// and reuse (auto-refresh) — this wins because it uses exactly what the
+	// console itself does, sidestepping the self-signed-JWT mint.
+	if p.refreshCurl != "" {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.iam != "" && time.Now().Before(p.iamExp.Add(-time.Minute)) {
+			return p.iam, nil
+		}
+		tok, exp, err := p.browserToken(ctx)
+		if err != nil {
+			return "", err
+		}
+		p.iam, p.iamExp = tok, exp
+		return tok, nil
+	}
 	// The authorized key wins over a pasted token: the bot re-signs IAM tokens
 	// itself, while a pasted one протухает и начинает давать 401.
 	if p.hasAuthKey() {
@@ -137,13 +161,15 @@ func (p *Provider) bearer(ctx context.Context) (string, error) {
 		}
 		return p.token, nil
 	}
-	return "", fmt.Errorf("mws: нет ключа — задай authorized_key (JSON «Авторизованного ключа») или private_key + key_id + service_account_id, либо token")
+	return "", fmt.Errorf("mws: нет ключа — задай authorized_key (JSON «Авторизованного ключа»), private_key + key_id + service_account_id, refresh_curl (браузерный запрос токена), либо token")
 }
 
 // sanitizeToken removes whitespace/newlines a token can pick up when pasted
-// (Telegram soft-wrapping, copy artifacts). A valid IAM/JWS token has none.
+// (Telegram soft-wrapping, copy artifacts) and unwraps a token pasted straight
+// from the browser as an "Authorization: Bearer …" header. A bare IAM/JWS token
+// passes through unchanged.
 func sanitizeToken(s string) string {
-	return strings.Join(strings.Fields(s), "")
+	return strings.Join(strings.Fields(extractBearer(s)), "")
 }
 
 // mapErr turns MWS's 401 into an actionable message about the IAM token.

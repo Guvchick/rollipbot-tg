@@ -56,7 +56,7 @@ func Fields(typ string) []Field {
 		return []Field{
 			{"private_key", true, true}, {"key_id", true, false}, {"service_account_id", true, false},
 			{"project_id", true, false},
-			{"authorized_key", false, true}, {"token", false, true},
+			{"authorized_key", false, true}, {"token", false, true}, {"refresh_curl", false, true},
 			{"api_url", false, false}, {"iam_url", false, false}, {"region", false, false},
 			{"network_id", false, false}, {"subnetwork_id", false, false},
 		}
@@ -111,8 +111,14 @@ func ValidateCreds(typ string, creds map[string]string) error {
 		}
 	}
 	if typ == "mws" {
-		// Catch key-type mix-ups (публичный ключ, API-ключ v1.…) at add time.
-		if err := mws.CheckAuthMaterial(creds["private_key"], creds["key_id"], creds["service_account_id"], creds["project_id"], creds["authorized_key"], creds["token"]); err != nil {
+		if creds["refresh_curl"] != "" {
+			// «Эмуляция браузера»: refresh_curl заменяет ключ/токен; нужен только
+			// project_id для пути VPC.
+			if creds["project_id"] == "" {
+				return &fieldError{typ, "нужен project_id (сегмент URL консоли после /iam/), даже с refresh_curl"}
+			}
+		} else if err := mws.CheckAuthMaterial(creds["private_key"], creds["key_id"], creds["service_account_id"], creds["project_id"], creds["authorized_key"], creds["token"]); err != nil {
+			// Catch key-type mix-ups (публичный ключ, API-ключ v1.…) at add time.
 			return err
 		}
 	}
