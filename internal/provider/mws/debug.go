@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -131,31 +132,46 @@ func plog(format string, args ...any) {
 
 // mintVariant is one candidate shape of the JWT→IAM-token exchange request.
 type mintVariant struct {
-	name   string
-	method string
-	url    string
-	body   []byte // nil for GET
-	bearer bool   // also send Authorization: Bearer <jwt>
+	name        string
+	method      string
+	url         string
+	contentType string // "" for GET / no body
+	body        []byte
+	bearer      bool // also send Authorization: Bearer <jwt>
 }
 
-// mintVariants enumerates the plausible request shapes for the mint endpoint,
-// covering the two ways the JWT can travel (body field vs Authorization header),
-// the body field-name candidates (jwt/assertion/token), the query vs no-query
-// path, and the Yandex-style /iam/v2/tokens collection.
+// mintVariants enumerates the plausible request shapes. Informed by the live
+// probe: POST to «…/tokens/:issueServiceAccountToken» (slash before colon) → 404
+// «No static resource», so this round adds the AIP/Google custom-method path
+// «…/tokens:issueServiceAccountToken» (NO slash) and the RFC 7523 OAuth2
+// jwt-bearer grant (grant_type + assertion, form-encoded) at the token
+// collection — the two most likely correct forms.
 func (p *Provider) mintVariants(jwt, sub string) []mintVariant {
-	field := func(name string) []byte {
+	jsonField := func(name string) []byte {
 		b, _ := json.Marshal(map[string]string{name: jwt})
 		return b
 	}
-	q := issueTokenPath + "?serviceAccount=" + sub
+	formGrant := []byte("grant_type=" + url.QueryEscape("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + url.QueryEscape(jwt))
+	const (
+		slash  = "/iam/v2/tokens/:issueServiceAccountToken" // current (wrong: 404 on POST)
+		colon  = "/iam/v2/tokens:issueServiceAccountToken"  // AIP custom method, no slash
+		coll   = "/iam/v2/tokens"                           // Yandex-style token collection
+		ctJSON = "application/json"
+		ctForm = "application/x-www-form-urlencoded"
+	)
+	q := "?serviceAccount=" + sub
+	b := p.iamBase
 	return []mintVariant{
-		{"POST :issue?query body{jwt}", http.MethodPost, p.iamBase + q, field("jwt"), false},
-		{"POST :issue body{jwt} (no query)", http.MethodPost, p.iamBase + issueTokenPath, field("jwt"), false},
-		{"POST /iam/v2/tokens body{jwt}", http.MethodPost, p.iamBase + "/iam/v2/tokens", field("jwt"), false},
-		{"GET :issue?query Bearer (original)", http.MethodGet, p.iamBase + q, nil, true},
-		{"POST :issue?query body{assertion}", http.MethodPost, p.iamBase + q, field("assertion"), false},
-		{"POST :issue?query body{token}", http.MethodPost, p.iamBase + q, field("token"), false},
-		{"POST :issue?query body{jwt}+Bearer", http.MethodPost, p.iamBase + q, field("jwt"), true},
+		{"POST tokens:issue(NO slash) body{jwt}", http.MethodPost, b + colon, ctJSON, jsonField("jwt"), false},
+		{"POST tokens:issue(NO slash)?q body{jwt}", http.MethodPost, b + colon + q, ctJSON, jsonField("jwt"), false},
+		{"POST tokens:issue(NO slash) form jwt-bearer", http.MethodPost, b + colon, ctForm, formGrant, false},
+		{"POST /iam/v2/tokens form jwt-bearer", http.MethodPost, b + coll, ctForm, formGrant, false},
+		{"POST /iam/v2/tokens body{jwt}", http.MethodPost, b + coll, ctJSON, jsonField("jwt"), false},
+		{"POST /iam/v2/tokens body{assertion}", http.MethodPost, b + coll, ctJSON, jsonField("assertion"), false},
+		{"POST :issue(slash)?q body{jwt} (current)", http.MethodPost, b + slash + q, ctJSON, jsonField("jwt"), false},
+		{"POST :issue(slash)?q form jwt-bearer", http.MethodPost, b + slash + q, ctForm, formGrant, false},
+		{"GET :issue(slash)?q Bearer (original)", http.MethodGet, b + slash + q, "", nil, true},
+		{"GET :issue(NO slash)?q Bearer", http.MethodGet, b + colon + q, "", nil, true},
 	}
 }
 
@@ -175,8 +191,8 @@ func (p *Provider) probeMint(ctx context.Context, jwt, sub string) (*issueTokenR
 			continue
 		}
 		req.Header.Set("Accept", "application/json")
-		if v.body != nil {
-			req.Header.Set("Content-Type", "application/json")
+		if v.contentType != "" {
+			req.Header.Set("Content-Type", v.contentType)
 		}
 		if v.bearer {
 			req.Header.Set("Authorization", "Bearer "+jwt)
