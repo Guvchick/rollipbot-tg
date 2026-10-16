@@ -161,12 +161,13 @@ func (p *Provider) waitForIP(ctx context.Context, id string) (string, error) {
 	}
 }
 
-// mapErr converts Timeweb's 403 "daily_limit_exceeded" body into a typed
-// provider.QuotaError (carrying the resume date) so the engine can pause the
-// account instead of retrying. Other errors pass through unchanged.
+// mapErr converts known Timeweb error bodies into typed errors: 403
+// "daily_limit_exceeded" → provider.QuotaError (carrying the resume date) so the
+// engine can pause the account; 404 "no_free_ip" → provider.RefusedError naming
+// the zone. Other errors pass through unchanged.
 func (p *Provider) mapErr(err error) error {
 	var apiErr *provider.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+	if !errors.As(err, &apiErr) {
 		return err
 	}
 	var body struct {
@@ -176,14 +177,25 @@ func (p *Provider) mapErr(err error) error {
 			AvailableDateForCreation string `json:"available_date_for_creation"`
 		} `json:"details"`
 	}
-	if json.Unmarshal([]byte(apiErr.Body), &body) != nil || body.ErrorCode != "daily_limit_exceeded" {
+	if json.Unmarshal([]byte(apiErr.Body), &body) != nil {
 		return err
 	}
-	q := &provider.QuotaError{Provider: p.Name(), Limit: body.Details.Limit}
-	if t, e := time.Parse(time.RFC3339, body.Details.AvailableDateForCreation); e == nil {
-		q.AvailableAt = t
+	switch {
+	case apiErr.StatusCode == http.StatusForbidden && body.ErrorCode == "daily_limit_exceeded":
+		q := &provider.QuotaError{Provider: p.Name(), Limit: body.Details.Limit}
+		if t, e := time.Parse(time.RFC3339, body.Details.AvailableDateForCreation); e == nil {
+			q.AvailableAt = t
+		}
+		return q
+	case body.ErrorCode == "no_free_ip":
+		zone := p.zone
+		if zone == "" {
+			zone = "по умолчанию"
+		}
+		return &provider.RefusedError{Provider: p.Name(), Detail: fmt.Sprintf(
+			"в зоне %s закончились свободные IP — попробуй позже или укажи другую availability_zone", zone)}
 	}
-	return q
+	return err
 }
 
 // releaseQuietly deletes a floating IP best-effort, on a fresh short context so

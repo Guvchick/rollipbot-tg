@@ -1,7 +1,6 @@
 package mws
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -21,22 +20,16 @@ import (
 )
 
 // issueTokenPath is the custom method that exchanges a self-signed JWT for an
-// IAM token. MWS Cloud Platform IAM is a Google-/Yandex-style API: the token
-// collection is created with POST /iam/v2/tokens (see mws.ru/docs/api/auth),
-// and :issueServiceAccountToken is a custom method on that same collection —
-// so it is a POST, and the JWT travels in the JSON body {"jwt":"<jwt>"} (как в
-// Yandex Cloud IAM POST /iam/v1/tokens), НЕ в заголовке Authorization. Раньше
-// код слал GET с JWT в Bearer и пустым телом — сервер не находил JWS в теле и
-// отвечал 401 «JWS parsing attempt failed». Сервисный аккаунт дополнительно
-// передаётся query-параметром serviceAccount=projects/<p>/serviceAccounts/<sa>
-// (path маршрутизировался живьём, поэтому оставлен как есть).
+// IAM token. The live MWS_PROBE settled the request FORM: only
+//
+//	GET /iam/v2/tokens/:issueServiceAccountToken?serviceAccount=projects/<p>/serviceAccounts/<sa>
+//	Authorization: Bearer <self-signed ES256 JWT>
+//
+// reaches the handler (it answers 401 «JWS parsing attempt failed»); every POST
+// variant → 401, the no-slash path → 404 «No static resource», and a POST+Bearer
+// → 404. So the JWT rides in Authorization, method is GET, path keeps the slash.
+// A persisting «JWS parsing…» after this is a key/claims issue, not the wiring.
 const issueTokenPath = "/iam/v2/tokens/:issueServiceAccountToken"
-
-// issueTokenRequest is the exchange body. The server parses .JWT as a compact
-// JWS and swaps it for an IAM token — mirror of Yandex Cloud IAM's {"jwt":...}.
-type issueTokenRequest struct {
-	JWT string `json:"jwt"`
-}
 
 // authorizedKey is the JSON MWS gives you when you create an "Авторизованный"
 // key. Field names mirror the downloadable file (snake_case).
@@ -234,12 +227,12 @@ func ResolveAuthorizedKeyJSON(s string) (keyID, saID, privPEM string, err error)
 // ключа, payload sub = projects/<p>/serviceAccounts/<sa> — mws.ru/docs/…/iam/
 // sa-get-access-token) and exchanges it for an IAM token:
 //
-//	POST {iam}/iam/v2/tokens/:issueServiceAccountToken?serviceAccount=<sub>
-//	Content-Type: application/json
-//	{"jwt":"<self-signed JWT>"}
+//	GET {iam}/iam/v2/tokens/:issueServiceAccountToken?serviceAccount=<sub>
+//	Authorization: Bearer <self-signed JWT>
 //
-// The self-signed JWT goes in the BODY (сервер парсит его как JWS), NOT in the
-// Authorization header — this is a mint endpoint, у нас ещё нет IAM-токена.
+// This GET+Bearer form is the only one that reaches the handler (per the live
+// MWS_PROBE — POST → 401, no-slash path → 404). A remaining 401 «JWS parsing…»
+// is a key/claims problem; use the «browser» path (refresh_curl) to sidestep it.
 func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error) {
 	keyID, saID, privPEM, err := resolveKeyMaterial(p.keyID, p.saID, p.privPEM, p.authKeyJSON)
 	if err != nil {
@@ -281,15 +274,11 @@ func (p *Provider) issueIAMToken(ctx context.Context) (string, time.Time, error)
 	// The serviceAccount query wants the full path with RAW slashes — the
 	// server routes %2F differently (проверено живьём).
 	reqURL := p.iamBase + issueTokenPath + "?serviceAccount=" + sub
-	reqBody, err := json.Marshal(issueTokenRequest{JWT: jwt})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/json")
 	var resp issueTokenResponse
 	if err := p.doDebug(req, &resp); err != nil {

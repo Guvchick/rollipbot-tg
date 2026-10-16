@@ -142,6 +142,18 @@ func (e *APIError) Retryable() bool {
 	return e.StatusCode == 429 || e.StatusCode >= 500
 }
 
+// RefusedError means the provider rejected the request for a reason retrying
+// won't fix (account deleted, zone out of addresses, …). Detail is a
+// ready-to-show explanation of what is wrong and what the user can do.
+type RefusedError struct {
+	Provider string
+	Detail   string
+}
+
+func (e *RefusedError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Provider, e.Detail)
+}
+
 // ErrNotImplemented marks operations a provider cannot perform via API
 // (e.g. panel-only hosters, or strategies that need extra account setup).
 var ErrNotImplemented = errors.New("operation not implemented for this provider")

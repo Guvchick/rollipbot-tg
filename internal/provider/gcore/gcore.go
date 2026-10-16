@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -149,7 +150,7 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 	if anyRegion {
 		rid, err := p.pickRegion(ctx)
 		if err != nil {
-			return provider.AllocatedIP{}, err
+			return provider.AllocatedIP{}, p.mapErr(err)
 		}
 		regionID = rid
 	}
@@ -161,7 +162,7 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 	}
 	var resp floatingIPResp
 	if err := provider.DoJSON(p.client, req, p.Name(), &resp); err != nil {
-		return provider.AllocatedIP{}, err
+		return provider.AllocatedIP{}, p.mapErr(err)
 	}
 
 	fipID, addrStr := resp.ID, resp.FloatingIPAddress
@@ -183,6 +184,29 @@ func (p *Provider) Allocate(ctx context.Context) (provider.AllocatedIP, error) {
 		return provider.AllocatedIP{}, fmt.Errorf("gcore: некорректный ip %q: %w", addrStr, err)
 	}
 	return provider.AllocatedIP{Addr: addr, ID: p.encodeID(anyRegion, regionID, fipID)}, nil
+}
+
+// mapErr превращает 403 с info.status (продукт Cloud клиента удалён/
+// заблокирован, напр. "deleted") в provider.RefusedError с понятным текстом —
+// повтор тут не поможет. Остальные ошибки проходят как есть.
+// Maps a 403 carrying the client's product status to a RefusedError.
+func (p *Provider) mapErr(err error) error {
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		return err
+	}
+	var body struct {
+		Info struct {
+			ClientID int    `json:"client_id"`
+			Status   string `json:"status"`
+		} `json:"info"`
+	}
+	if json.Unmarshal([]byte(apiErr.Body), &body) != nil || body.Info.Status == "" {
+		return err
+	}
+	return &provider.RefusedError{Provider: p.Name(), Detail: fmt.Sprintf(
+		"аккаунт Gcore (client %d) в статусе %q — облако недоступно. Проверь аккаунт в панели Gcore или выключи его в боте",
+		body.Info.ClientID, body.Info.Status)}
 }
 
 // resolveTask ждёт завершения задачи и возвращает (fipID, address) созданного

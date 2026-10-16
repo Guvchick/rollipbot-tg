@@ -20,7 +20,7 @@ import (
 )
 
 // End-to-end: the bot signs an ES256 JWT, exchanges it via
-// POST :issueServiceAccountToken (JWT in the {"jwt":…} body, serviceAccount
+// GET :issueServiceAccountToken (JWT in Authorization: Bearer, serviceAccount
 // query), and uses the returned IAM token for the VPC call. The mock IAM server
 // verifies the JWT cryptographically, so a bad signature fails the test.
 func TestAuthorizedKeyJWTFlow(t *testing.T) {
@@ -40,18 +40,19 @@ func TestAuthorizedKeyJWTFlow(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/iam/v2/tokens/:issueServiceAccountToken":
-			if r.Method != http.MethodPost {
-				t.Errorf("issue method = %s, want POST", r.Method)
+			if r.Method != http.MethodGet {
+				t.Errorf("issue method = %s, want GET", r.Method)
 			}
-			// The mint endpoint must NOT require an Authorization token — the
-			// self-signed JWT rides in the body, not the Bearer header.
-			if got := r.Header.Get("Authorization"); got != "" {
-				t.Errorf("issue Authorization = %q, want empty (JWT goes in the body)", got)
+			// The self-signed JWT rides in Authorization: Bearer (proven by the
+			// live probe — GET+Bearer is the only form that reaches the handler).
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "Bearer ") {
+				t.Errorf("issue Authorization = %q, want a Bearer JWT", auth)
 			}
+			jwt := strings.TrimPrefix(auth, "Bearer ")
 			if sa := r.URL.Query().Get("serviceAccount"); sa != "projects/p/serviceAccounts/sa-1" {
 				t.Errorf("serviceAccount = %q, want projects/p/serviceAccounts/sa-1", sa)
 			}
-			jwt := readJWTBody(t, r)
 			if verifyES256(t, jwt, &priv.PublicKey) {
 				jwtVerified = true
 			}
@@ -157,29 +158,26 @@ func verifyES256(t *testing.T, jwt string, pub *ecdsa.PublicKey) bool {
 	return ecdsa.Verify(pub, digest[:], r, s)
 }
 
-// readJWTBody pulls the self-signed JWT out of the exchange body {"jwt":"..."}.
-func readJWTBody(t *testing.T, r *http.Request) string {
+// readJWTBearer pulls the self-signed JWT out of the Authorization: Bearer header.
+func readJWTBearer(t *testing.T, r *http.Request) string {
 	t.Helper()
-	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("issue Content-Type = %q, want application/json", ct)
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		t.Fatalf("issue Authorization = %q, want a Bearer JWT", auth)
 	}
-	var body struct {
-		JWT string `json:"jwt"`
+	jwt := strings.TrimPrefix(auth, "Bearer ")
+	if jwt == "" {
+		t.Fatal("empty Bearer JWT")
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		t.Fatalf("issue body is not JSON {\"jwt\":…}: %v", err)
-	}
-	if body.JWT == "" {
-		t.Fatal(`issue body has no "jwt" field — server would answer "JWS parsing attempt failed"`)
-	}
-	return body.JWT
+	return jwt
 }
 
 // TestIssueIAMTokenRequestShape locks the exact wire contract of the token
-// exchange (the thing that regressed into HTTP 401 «JWS parsing attempt
-// failed»): POST, the :issueServiceAccountToken path, a {"jwt":…} JSON body
-// whose JWT parses into header{typ,alg,kid} + payload{sub,exp}, and no stray
-// iss/aud that MWS docs don't ask for.
+// exchange (the thing that produced HTTP 401 «JWS parsing attempt failed»): a
+// GET to the :issueServiceAccountToken path with the self-signed JWT in
+// Authorization: Bearer (proven by the live probe — POST → 401, no-slash → 404),
+// whose JWT parses into header{typ,alg,kid} + payload{sub,iat,exp} with no stray
+// iss/aud.
 func TestIssueIAMTokenRequestShape(t *testing.T) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -189,13 +187,12 @@ func TestIssueIAMTokenRequestShape(t *testing.T) {
 	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
 
 	var (
-		gotMethod, gotPath, gotJWT string
-		gotAuth                    = "SENTINEL"
+		gotMethod, gotPath, gotJWT, gotQuery string
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
-		gotAuth = r.Header.Get("Authorization")
-		gotJWT = readJWTBody(t, r)
+		gotQuery = r.URL.Query().Get("serviceAccount")
+		gotJWT = readJWTBearer(t, r)
 		_, _ = w.Write([]byte(`{"token":"iam-abc","expireTime":"2030-01-02T03:04:05Z"}`))
 	}))
 	defer srv.Close()
@@ -211,14 +208,14 @@ func TestIssueIAMTokenRequestShape(t *testing.T) {
 	if exp.Year() != 2030 {
 		t.Errorf("expiry = %v, want the response expireTime", exp)
 	}
-	if gotMethod != http.MethodPost {
-		t.Errorf("method = %s, want POST", gotMethod)
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %s, want GET", gotMethod)
 	}
 	if gotPath != "/iam/v2/tokens/:issueServiceAccountToken" {
 		t.Errorf("path = %q, want /iam/v2/tokens/:issueServiceAccountToken", gotPath)
 	}
-	if gotAuth != "" {
-		t.Errorf("Authorization = %q, want empty (JWT belongs in the body)", gotAuth)
+	if gotQuery != "projects/proj-9/serviceAccounts/sa-9" {
+		t.Errorf("serviceAccount = %q, want projects/proj-9/serviceAccounts/sa-9", gotQuery)
 	}
 	// The JWT must be a valid ES256 JWS with exactly the documented claims.
 	if !verifyES256(t, gotJWT, &priv.PublicKey) {

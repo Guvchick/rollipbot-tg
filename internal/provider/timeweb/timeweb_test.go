@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -228,5 +229,27 @@ func TestAllocateAPIErrorRetryable(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusTooManyRequests || !apiErr.Retryable() {
 		t.Errorf("status = %d retryable = %v, want 429/retryable", apiErr.StatusCode, apiErr.Retryable())
+	}
+}
+
+// A 404 no_free_ip means the zone's pool is empty — surface it as a typed
+// RefusedError naming the zone, not a raw API dump.
+func TestAllocateNoFreeIPBecomesRefusedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"status_code":404,"error_code":"no_free_ip","message":"There are no available free IPs","response_id":"6bde9645"}`))
+	}))
+	defer srv.Close()
+
+	p := New("tok", "spb-3", provider.RollCaps{})
+	p.base = srv.URL
+
+	_, err := p.Allocate(context.Background())
+	var re *provider.RefusedError
+	if !errors.As(err, &re) {
+		t.Fatalf("err = %v, want *provider.RefusedError", err)
+	}
+	if !strings.Contains(re.Detail, "spb-3") {
+		t.Errorf("detail = %q, want it to name the zone spb-3", re.Detail)
 	}
 }

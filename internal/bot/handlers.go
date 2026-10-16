@@ -1152,7 +1152,10 @@ func (h *Handler) confirmText(st *dialogState, acc *provider.Account) string {
 
 func (h *Handler) rollErrText(display string, err error) string {
 	var quota *provider.QuotaError
+	var refused *provider.RefusedError
 	switch {
+	case errors.As(err, &refused):
+		return fmt.Sprintf("⛔ %s: %s.", display, refused.Detail)
 	case errors.As(err, &quota):
 		when := "через ~24 часа"
 		if !quota.AvailableAt.IsZero() {

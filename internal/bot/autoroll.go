@@ -142,6 +142,8 @@ func (h *Handler) autoRollOnce(ctx context.Context, b *bot.Bot, acc *provider.Ac
 		summary = fmt.Sprintf("🎯 поймал %s за %d попыт. — в пуле", res.IP.Addr.String(), res.Attempts)
 	case isQuotaErr(err):
 		summary = "⛔ квота провайдера исчерпана"
+	case errors.As(err, new(*provider.RefusedError)):
+		summary = "⛔ " + err.Error()
 	case errors.Is(err, engine.ErrBudgetExhausted):
 		summary = fmt.Sprintf("🟡 без совпадений за %d попыт. (цели: %s)", budget, maskStr)
 	case errors.Is(err, engine.ErrDailyCap):

@@ -2,6 +2,7 @@ package gcore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -301,5 +302,41 @@ func TestParseConsoleURL(t *testing.T) {
 					c.in, proj, reg, ok, c.proj, c.reg, c.ok)
 			}
 		})
+	}
+}
+
+// (f) Удалённый/деактивированный аккаунт Gcore (403 с info.status) — типизированная
+// RefusedError с понятным текстом, а не сырой ответ API.
+func TestAllocateDeletedClientBecomesRefusedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"exception_class":"UnauthorizedError","message":"The client(1004991) product status is in <deleted> status","request_id":"03e450d0","info":{"client_id":1004991,"status":"deleted"}}`)
+	}))
+	defer srv.Close()
+
+	p := New(Config{APIURL: srv.URL, APIToken: "tok", ProjectID: "proj1", RegionID: 5}, provider.RollCaps{})
+	_, err := p.Allocate(context.Background())
+	var re *provider.RefusedError
+	if !errors.As(err, &re) {
+		t.Fatalf("err = %v, want *provider.RefusedError", err)
+	}
+	if !strings.Contains(re.Detail, "1004991") || !strings.Contains(re.Detail, "deleted") {
+		t.Errorf("detail = %q, want client id and status", re.Detail)
+	}
+}
+
+// (f') То же в режиме any-region: 403 приходит уже на GET /v1/regions.
+func TestAllocateAnyRegionDeletedClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"exception_class":"UnauthorizedError","message":"The client(1004991) product status is in <deleted> status","info":{"client_id":1004991,"status":"deleted"}}`)
+	}))
+	defer srv.Close()
+
+	p := New(Config{APIURL: srv.URL, APIToken: "tok", ProjectID: "proj1", RegionID: 0}, provider.RollCaps{})
+	_, err := p.Allocate(context.Background())
+	var re *provider.RefusedError
+	if !errors.As(err, &re) {
+		t.Fatalf("err = %v, want *provider.RefusedError", err)
 	}
 }
