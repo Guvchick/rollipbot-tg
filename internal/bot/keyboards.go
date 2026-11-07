@@ -18,6 +18,7 @@ var typeNames = map[string]string{
 	"selectel": "Selectel",
 	"gcore":    "Gcore",
 	"mws":      "MWS",
+	"cherry":   "Cherry Servers",
 	"ruvds":    "RuVDS",
 	"beget":    "Beget",
 }

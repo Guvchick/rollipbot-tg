@@ -98,7 +98,7 @@ func TestSingleRequiredField(t *testing.T) {
 		t.Errorf("timeweb single required = %q, want token", got)
 	}
 	// providers with several required fields have no single bare-token shortcut
-	for _, typ := range []string{"vkcloud", "selectel", "gcore", "mws", "ruvds", "beget"} {
+	for _, typ := range []string{"vkcloud", "selectel", "gcore", "mws", "cherry", "ruvds", "beget"} {
 		if got := singleRequiredField(typ); got != "" {
 			t.Errorf("%s should have no single required field, got %q", typ, got)
 		}

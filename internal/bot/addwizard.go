@@ -128,6 +128,12 @@ func (h *Handler) acceptAddField(ctx context.Context, b *bot.Bot, chatID int64, 
 			return
 		}
 	}
+	if st.AddType == "cherry" && f.Name == "project_id" {
+		if _, err := strconv.Atoi(value); err != nil {
+			h.send(ctx, b, chatID, "project_id должно быть числом (напр. 123456) — ID проекта из портала Cherry Servers.")
+			return
+		}
+	}
 	// Hygiene: try to drop the user's message when it carried a secret. In
 	// private chats Telegram forbids deleting the user's own messages, so this
 	// may fail — that's fine, we just log it.

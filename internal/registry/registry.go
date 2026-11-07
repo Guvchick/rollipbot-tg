@@ -15,6 +15,7 @@ import (
 	"ip-roller-bot/internal/config"
 	"ip-roller-bot/internal/provider"
 	"ip-roller-bot/internal/provider/beget"
+	"ip-roller-bot/internal/provider/cherry"
 	"ip-roller-bot/internal/provider/gcore"
 	"ip-roller-bot/internal/provider/mws"
 	"ip-roller-bot/internal/provider/ruvds"
@@ -26,7 +27,7 @@ import (
 )
 
 // Types lists every supported provider type (machine name).
-var Types = []string{"timeweb", "vkcloud", "yandex", "selectel", "gcore", "mws", "ruvds", "beget"}
+var Types = []string{"timeweb", "vkcloud", "yandex", "selectel", "gcore", "mws", "cherry", "ruvds", "beget"}
 
 // IsType reports whether t is a known provider type.
 func IsType(t string) bool {
@@ -214,6 +215,17 @@ func buildAdapter(typ string, creds map[string]string, b *config.ProviderConfig,
 			NetworkID:        creds["network_id"],
 			SubnetworkID:     creds["subnetwork_id"],
 			RefreshCurl:      creds["refresh_curl"],
+		}, caps), nil
+
+	case "cherry":
+		if creds["token"] == "" {
+			return nil, fmt.Errorf("cherry: пустой token")
+		}
+		return cherry.New(cherry.Config{
+			APIURL:    get("api_url", b.APIURL),
+			Token:     creds["token"],
+			ProjectID: creds["project_id"],
+			Region:    get("region", b.Region),
 		}, caps), nil
 
 	case "ruvds":

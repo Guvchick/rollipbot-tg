@@ -111,4 +111,27 @@ func TestValidateCreds(t *testing.T) {
 	if err := ValidateCreds("timeweb", map[string]string{"token": "x"}); err != nil {
 		t.Errorf("valid creds rejected: %v", err)
 	}
+	if err := ValidateCreds("cherry", map[string]string{"token": "x", "project_id": "123"}); err == nil {
+		t.Error("expected error for missing cherry region")
+	}
+	if err := ValidateCreds("cherry", map[string]string{"token": "x", "project_id": "my-proj", "region": "LT-Siauliai"}); err == nil {
+		t.Error("expected error for non-numeric cherry project_id")
+	}
+	if err := ValidateCreds("cherry", map[string]string{"token": "x", "project_id": "123", "region": "LT-Siauliai"}); err != nil {
+		t.Errorf("valid cherry creds rejected: %v", err)
+	}
+}
+
+func TestBuildCherryAdapter(t *testing.T) {
+	block := &config.ProviderConfig{Region: "LT-Siauliai"}
+	p, err := buildAdapter("cherry", map[string]string{"token": "x", "project_id": "123"}, block, config.CapsOf(block))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name() != "cherry" {
+		t.Errorf("adapter name = %q", p.Name())
+	}
+	if _, err := buildAdapter("cherry", map[string]string{"project_id": "123"}, block, config.CapsOf(block)); err == nil {
+		t.Error("expected error for empty cherry token")
+	}
 }

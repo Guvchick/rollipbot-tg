@@ -81,6 +81,7 @@ Telegram → bot (UI/FSM) → engine (roll loop + limiter + daily cap + backoff)
 | **Selectel** | OpenStack/Neutron floating IP (gophercloud) | ✅ реализован |
 | **Gcore** | floating IP (REST `apikey`) | ✅ реализован: async-таски опрашиваются (`/v1/tasks`); `region_id` можно не задавать — роллит по любому региону |
 | **MWS** | reserved IP в подсети (REST) | ✅ allocate/release; IAM-токен выдаётся `POST /iam/v2/tokens/:issueServiceAccountToken` c JWT в теле; attach — при создании ВМ |
+| **Cherry Servers** | floating IP (REST `Bearer`) | ✅ реализован: заказ/удаление/привязка (`targeted_to`), автоочистка только своих (тег `created_by=ip-roller-bot`) IP в регионе аккаунта |
 | **RuVDS** | пересоздание/доп. IP сервера | ⚠️ каркас: allocate под защитой (нужен `server_id`, платно) |
 | **Beget** | заказ доп. IPv4 / пересоздание VPS | ⚠️ каркас: allocate под защитой (нужен `server_id`, платно) |
 | IHC/Contell/UFO/Vinton | панель без API | `internal/provider/cookie` — cookie-фолбэк (скелет) |

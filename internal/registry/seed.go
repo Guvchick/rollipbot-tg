@@ -60,6 +60,11 @@ func Fields(typ string) []Field {
 			{"api_url", false, false}, {"iam_url", false, false}, {"region", false, false},
 			{"network_id", false, false}, {"subnetwork_id", false, false},
 		}
+	case "cherry":
+		return []Field{
+			{"token", true, true}, {"project_id", true, false}, {"region", true, false},
+			{"api_url", false, false},
+		}
 	case "ruvds":
 		return []Field{{"token", true, true}, {"server_id", true, false}}
 	case "beget":
@@ -108,6 +113,11 @@ func ValidateCreds(typ string, creds map[string]string) error {
 			if _, err := strconv.Atoi(v); err != nil {
 				return &fieldError{typ, "region_id должно быть числом"}
 			}
+		}
+	}
+	if typ == "cherry" {
+		if _, err := strconv.Atoi(creds["project_id"]); err != nil {
+			return &fieldError{typ, "project_id должно быть числом"}
 		}
 	}
 	if typ == "mws" {
@@ -177,6 +187,11 @@ func credsFromBlock(typ string, b *config.ProviderConfig) map[string]string {
 		put("subnetwork_id", b.SubnetworkID)
 		put("api_url", b.APIURL)
 		put("iam_url", b.IAMURL)
+	case "cherry":
+		put("token", b.Token)
+		put("project_id", b.ProjectID)
+		put("region", b.Region)
+		put("api_url", b.APIURL)
 	case "ruvds":
 		put("token", b.Token)
 		put("server_id", b.ServerID)

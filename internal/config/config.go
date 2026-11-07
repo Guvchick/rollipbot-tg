@@ -70,6 +70,7 @@ type ProvidersConfig struct {
 	MWS      *ProviderConfig `yaml:"mws"`
 	RuVDS    *ProviderConfig `yaml:"ruvds"`
 	Beget    *ProviderConfig `yaml:"beget"`
+	Cherry   *ProviderConfig `yaml:"cherry"`
 }
 
 // ProviderConfig is a superset of every provider's settings; each adapter reads
@@ -84,7 +85,7 @@ type ProviderConfig struct {
 	CostPerRoll    string   `yaml:"cost_per_roll"`
 	Masks          []string `yaml:"masks"`
 
-	// Token-auth REST providers (timeweb, ruvds, mws, beget).
+	// Token-auth REST providers (timeweb, ruvds, mws, beget, cherry).
 	Token string `yaml:"token"`
 
 	// Timeweb
@@ -171,6 +172,8 @@ func (p ProvidersConfig) Get(name string) *ProviderConfig {
 		return p.RuVDS
 	case "beget":
 		return p.Beget
+	case "cherry":
+		return p.Cherry
 	}
 	return nil
 }

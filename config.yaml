@@ -125,6 +125,22 @@ providers:
     roll_delay_ms: 1500         # пауза между роллами (мс)
     masks: ["89.108.0.0/16"]
 
+  cherry:
+    enabled: false
+    # Cherry Servers: API-ключ — portal.cherryservers.com → Settings → API Keys.
+    # Floating IP региональный: region = slug региона твоего сервера.
+    api_url: https://api.cherryservers.com/v1
+    token: ${CHERRY_TOKEN}
+    project_id: ${CHERRY_PROJECT_ID}  # число (ID проекта)
+    region: LT-Siauliai               # GET /v1/regions — список slug'ов
+    strategy: floating
+    max_rolls_per_run: 20
+    daily_cap: 0                # 0 = без дневного лимита
+    rate_limit_rps: 3           # API режет >4 req/s с одного IP (HTTP 429)
+    roll_delay_ms: 1000
+    cost_per_roll: "почасовая оплата floating IP, пока не удалён"
+    masks: []                   # задай свои цели через 🎯 IP-пресеты
+
   # --- IP привязан к серверу: роллинг пересозданием / заказом доп. IP ---
   # Allocate выдаёт явную ошибку, пока не задан server_id и платный сценарий
   # (эти операции мутируют/пересоздают реальные платные серверы).

@@ -83,6 +83,16 @@ var providerGuides = map[string]providerGuide{
 		},
 		example: `/addaccount mws prod {"private_key":"-----BEGIN PRIVATE KEY-----\n...","key_id":"access-key-r60vh0","service_account_id":"SA","project_id":"P"}`,
 	},
+	"cherry": {
+		title: "Cherry Servers (floating IP)",
+		steps: []string{
+			"Портал https://portal.cherryservers.com → Settings → API Keys → создай ключ → это поле token.",
+			"project_id — число, ID проекта: открой проект в портале, оно в адресной строке после /projects/. Или через API: GET https://api.cherryservers.com/v1/teams → id команды → GET /v1/teams/<id>/projects.",
+			"region — slug региона, где стоит твой сервер (напр. LT-Siauliai). Список: GET https://api.cherryservers.com/v1/regions с тем же токеном.",
+			"⚠️ Роллинг = заказ floating IP (почасовая оплата, пока не удалён — бот удаляет непопавшие). Лимит Cherry — до 4 floating IP на сервер в команде.",
+		},
+		example: `/addaccount cherry prod {"token":"TOKEN","project_id":"123456","region":"LT-Siauliai"}`,
+	},
 	"ruvds": {
 		title: "RuVDS",
 		steps: []string{
@@ -154,6 +164,12 @@ var fieldHints = map[string]map[string]string{
 		"region":             "Регион, если требуется. Необязательно.",
 		"network_id":         "Обычно НЕ нужен для внешнего адреса. Необязательно.",
 		"subnetwork_id":      "Обычно НЕ нужен для внешнего адреса. Необязательно.",
+	},
+	"cherry": {
+		"token":      "API-ключ: portal.cherryservers.com → Settings → API Keys → создать.",
+		"project_id": "ID проекта (число) — в адресной строке портала после /projects/ при открытом проекте.",
+		"region":     "Slug региона сервера, напр. LT-Siauliai. Список регионов: GET https://api.cherryservers.com/v1/regions.",
+		"api_url":    "По умолчанию https://api.cherryservers.com/v1. Необязательно — можно пропустить.",
 	},
 	"ruvds": {
 		"token":     "Токен: Личный кабинет → «Настройки» → «Информация API».",
